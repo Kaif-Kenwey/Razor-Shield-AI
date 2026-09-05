@@ -27,7 +27,7 @@ interface QualityDimension {
   impact: string;
 }
 
-function missingDevice(device: string): boolean {
+function isDeviceMissing(device: string): boolean {
   const k = device.trim().toLowerCase();
   return !k || k.startsWith("unknown");
 }
@@ -37,7 +37,7 @@ export function computeDataQuality(rows: ScoredRow[]) {
   const pct = (n: number) => (total ? Math.round((n / total) * 100) : 0);
 
   const missingTimestamp = rows.filter((r) => !r.timestamp).length;
-  const missingDevice = rows.filter((r) => missingDevice(r.device)).length;
+  const missingDevice = rows.filter((r) => isDeviceMissing(r.device)).length;
   const missingCustomer = rows.filter((r) => !r.customerId).length;
   const missingAmount = rows.filter((r) => !(r.amount > 0)).length;
   const missingLabel = rows.filter((r) => r.label === null).length;
