@@ -23,6 +23,8 @@ const SIGNAL_SHORT: Record<SignalType, string> = {
   HIGH_VALUE: "High value",
   MERCHANT_RISK: "Merchant",
   TIME_ANOMALY: "Time",
+  METHOD_MISMATCH: "Method",
+  STRUCTURING: "Structuring",
 };
 
 const LEVEL_CHIP: Record<RiskLevel, string> = {

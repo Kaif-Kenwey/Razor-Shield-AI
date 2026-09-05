@@ -200,3 +200,95 @@ export function downloadCasesCsv(
     return false;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Markdown case brief — Slack / ticket-ready summary                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Compact, human-readable Markdown brief for pasting into Slack, Jira or an
+ * audit doc. Complements the JSON export (machines) and Print (paper).
+ */
+export function buildCaseMarkdown(
+  txn: Transaction,
+  investigation: Investigation | null,
+  customer: Customer | null,
+  notes: CaseNote[] = [],
+  signedInAnalystId = "RK",
+): string {
+  const signedIn = ANALYSTS.find((a) => a.id === signedInAnalystId);
+  const lines: string[] = [];
+
+  lines.push(`## 🛡 RazorShield case brief — ${txn.id}`);
+  lines.push("");
+  lines.push("| Field | Value |");
+  lines.push("| --- | --- |");
+  lines.push(`| Amount | ${formatINR(txn.amount)} |`);
+  lines.push(`| Risk | **${txn.riskScore}/100 · ${txn.riskLevel}** |`);
+  lines.push(`| Customer | ${txn.customerId}${customer?.name ? ` — ${customer.name}` : ""} |`);
+  lines.push(`| Rail | ${txn.paymentMethod} · ${txn.merchant} · ${txn.location} |`);
+  if (txn.recommendation) {
+    lines.push(`| AI recommendation | ${txn.recommendation}${txn.confidence != null ? ` · ${txn.confidence}% confidence` : ""} |`);
+  }
+  if (signedIn) lines.push(`| Brief by | ${signedIn.name} (${signedIn.level}) |`);
+  lines.push("");
+
+  if (txn.aiSummary) {
+    lines.push(`**AI summary:** ${txn.aiSummary}`);
+    lines.push("");
+  }
+  if (txn.signals?.length) {
+    lines.push("**Key signals**");
+    for (const s of txn.signals) {
+      lines.push(`- **${s.title}** (${s.impact} pts) — ${s.evidence}`);
+    }
+    lines.push("");
+  }
+  if (investigation?.analystAction) {
+    const at = investigation.resolvedAt
+      ? new Date(investigation.resolvedAt).toISOString().slice(0, 16).replace("T", " ") + " UTC"
+      : "";
+    lines.push(`**Decision:** ${investigation.analystAction}${signedIn ? ` — by ${signedIn.name}` : ""}${at ? ` · ${at}` : ""}`);
+    if (investigation.analystNote) lines.push(`> ${investigation.analystNote}`);
+    lines.push("");
+  }
+  if (notes.length) {
+    lines.push(`**Notebook (${notes.length})**`);
+    for (const n of notes) {
+      const who = ANALYSTS.find((a) => a.id === n.analystId)?.name ?? n.analystId;
+      lines.push(`1. (${who}) ${n.text}`);
+    }
+    lines.push("");
+  }
+  lines.push("_Synthetic demo data · RazorShield AI — Razorpay AI Buildathon 2026_");
+  return lines.join("\n");
+}
+
+/**
+ * Clipboard write with a legacy fallback — resolves false when the browser
+ * blocks both paths (headless contexts, denied permissions).
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fall through to the legacy path */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}

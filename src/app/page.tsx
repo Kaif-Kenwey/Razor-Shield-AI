@@ -17,6 +17,7 @@ import { InvestigationsView } from "@/components/investigation/InvestigationsVie
 import { InvestigationView } from "@/components/investigation/InvestigationView";
 import { TransactionsView } from "@/components/transactions/TransactionsView";
 import { TransactionDetailView } from "@/components/transactions/TransactionDetailView";
+import { DataStudioView } from "@/components/datastudio/DataStudioView";
 import { RiskIntelligenceView } from "@/components/risk/RiskIntelligenceView";
 import { ModelPerformanceView } from "@/components/model/ModelPerformanceView";
 import { SystemView } from "@/components/system/SystemView";
@@ -24,7 +25,7 @@ import { ConnectionLostState } from "@/components/shared/States";
 import { useAppStore } from "@/store/appStore";
 import { useLiveTransactions } from "@/hooks/useLiveTransactions";
 
-const DATA_VIEWS = new Set(["overview", "investigations", "transactions"]);
+const DATA_VIEWS = new Set(["overview", "investigations", "transactions", "datastudio"]);
 
 function ConnectionGuard({ children }: { children: React.ReactNode }) {
   const connection = useAppStore((s) => s.connection);
@@ -68,6 +69,7 @@ function CurrentView() {
           {view === "investigation" && <InvestigationView />}
           {view === "transactions" && <TransactionsView />}
           {view === "transaction-detail" && <TransactionDetailView />}
+          {view === "datastudio" && <DataStudioView />}
           {view === "intelligence" && <RiskIntelligenceView />}
           {view === "model" && <ModelPerformanceView />}
           {view === "system" && <SystemView />}

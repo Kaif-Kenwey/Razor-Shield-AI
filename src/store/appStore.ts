@@ -41,8 +41,8 @@ interface AppState {
   decisions: Record<string, { action: RiskAction; note?: string; at: string; analystId?: string }>;
   /** Cases the analyst is watching. */
   watchlist: Record<string, true>;
-  /** Case handoff — which analyst a case is assigned to (acceptedAt = claim recorded). */
-  assignments: Record<string, { analystId: string; at: string; acceptedAt?: string }>;
+  /** Case handoff — which analyst a case is assigned to (acceptedAt = claim recorded; keepPersona = claim without switch). */
+  assignments: Record<string, { analystId: string; at: string; acceptedAt?: string; keepPersona?: boolean }>;
   /** SLA-breach escalations — one-click "send to the L3 fraud lead" events (audited). */
   escalations: Record<string, { at: string; byAnalystId: string; toAnalystId: string }>;
   /** Append-only per-case analyst notebook. */
@@ -69,6 +69,8 @@ interface AppState {
   openInvestigation: (txnId: string) => void;
   openTransactionDetail: (txnId: string) => void;
   setTransactions: (txns: Transaction[]) => void;
+  /** Prepend externally-produced transactions (e.g. Dataset Studio imports) into the live ledger. */
+  injectTransactions: (txns: Transaction[]) => void;
   setLoading: (loading: boolean) => void;
   setDemoMode: (on: boolean) => void;
   setStreamPaused: (paused: boolean) => void;
@@ -147,6 +149,14 @@ export const useAppStore = create<AppState>()(
     set({ view: "transaction-detail", detailTxnId: txnId, focusTxnId: null }),
 
   setTransactions: (transactions) => set({ transactions }),
+
+  injectTransactions: (txns) =>
+    set((s) => {
+      const known = new Set(s.transactions.map((t) => t.id));
+      const fresh = txns.filter((t) => !known.has(t.id));
+      return fresh.length ? { transactions: [...fresh, ...s.transactions] } : {};
+    }),
+
   setLoading: (loading) => set({ loading }),
   setDemoMode: (demoMode) => set({ demoMode }),
   setStreamPaused: (streamPaused) => set({ streamPaused }),
@@ -175,7 +185,16 @@ export const useAppStore = create<AppState>()(
       const a = s.assignments[txnId];
       if (!a || a.acceptedAt) return {};
       return {
-        assignments: { ...s.assignments, [txnId]: { ...a, acceptedAt: new Date().toISOString() } },
+        assignments: {
+          ...s.assignments,
+          [txnId]: {
+            ...a,
+            acceptedAt: new Date().toISOString(),
+            /* persist the claim mode — the audit trail renders "claimed on behalf of"
+               vs "accepted by" from this flag */
+            keepPersona: Boolean(opts?.keepPersona),
+          },
+        },
         /* claiming a handoff means acting as the assigned analyst from now on —
            unless the claimer keeps their own persona (L3 leads reviewing other queues) */
         ...(!opts?.keepPersona ? { signedInAnalystId: a.analystId } : {}),

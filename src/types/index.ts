@@ -34,7 +34,9 @@ export type SignalType =
   | "IMPOSSIBLE_TRAVEL"
   | "HIGH_VALUE"
   | "MERCHANT_RISK"
-  | "TIME_ANOMALY";
+  | "TIME_ANOMALY"
+  | "METHOD_MISMATCH"
+  | "STRUCTURING";
 
 /** A single piece of risk evidence attached to a transaction. */
 export interface RiskSignal {
@@ -180,6 +182,7 @@ export type ViewKey =
   | "overview"
   | "investigations"
   | "transactions"
+  | "datastudio"
   | "intelligence"
   | "model"
   | "system"

@@ -15,6 +15,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ClipboardCopy,
   Download,
   Lock,
   Printer,
@@ -30,7 +31,7 @@ import { SlaChip } from "@/components/shared/SlaChip";
 import { useToast } from "@/hooks/use-toast";
 import { useAppStore } from "@/store/appStore";
 import { ANALYSTS, customerFor } from "@/data/mockData";
-import { buildCaseFile, downloadCaseFile } from "@/lib/caseFile";
+import { buildCaseFile, buildCaseMarkdown, copyText, downloadCaseFile } from "@/lib/caseFile";
 import { formatINR } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Investigation, Transaction } from "@/types";
@@ -70,6 +71,7 @@ export function CaseHeader({
   const assignedAnalyst = assignment ? ANALYSTS.find((a) => a.id === assignment.analystId) : undefined;
   const { toast } = useToast();
   const [exported, setExported] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [assignOpen, setAssignOpen] = useState(false);
   const [acceptMenuOpen, setAcceptMenuOpen] = useState(false);
 
@@ -116,6 +118,26 @@ export function CaseHeader({
       toast({
         title: "Export unavailable",
         description: "The browser blocked the download in this context.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  /** Copy a Slack/ticket-ready Markdown brief of the case. */
+  const copyCaseBrief = async () => {
+    const md = buildCaseMarkdown(txn, investigation ?? null, customerFor(txn), caseNotes ?? [], signedInId);
+    const ok = await copyText(md);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+      toast({
+        title: "Case brief copied as Markdown",
+        description: `${txn.id} — paste it straight into Slack, Jira or the audit doc.`,
+      });
+    } else {
+      toast({
+        title: "Copy unavailable",
+        description: "The browser blocked clipboard access in this context.",
         variant: "destructive",
       });
     }
@@ -183,6 +205,20 @@ export function CaseHeader({
             >
               {exported ? <Check className="h-3 w-3" aria-hidden /> : <Download className="h-3 w-3" aria-hidden />}
               {exported ? "Exported" : "Export"}
+            </button>
+            <button
+              onClick={copyCaseBrief}
+              aria-label="Copy case brief as Markdown"
+              title="Copy case brief (Markdown) — Slack, Jira and audit-doc ready"
+              className={cn(
+                "flex h-7 items-center gap-1.5 rounded-sm border px-2 text-[10.5px] font-medium transition-all active:scale-95",
+                copied
+                  ? "border-intel/40 bg-intel/10 text-intel"
+                  : "border-line bg-surface-1 text-slate-500 hover:border-line-strong hover:text-slate-200"
+              )}
+            >
+              {copied ? <Check className="h-3 w-3" aria-hidden /> : <ClipboardCopy className="h-3 w-3" aria-hidden />}
+              {copied ? "Copied" : "Copy brief"}
             </button>
             <Tooltip>
               <TooltipTrigger asChild>

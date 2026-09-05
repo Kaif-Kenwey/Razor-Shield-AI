@@ -4,7 +4,7 @@
 
 *Razorpay AI Buildathon 2026 — "AI Risk Manager" track*
 
-![Next.js](https://img.shields.io/badge/Next.js-16-black) ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue) ![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4) ![shadcn/ui](https://img.shields.io/badge/shadcn%2Fui-latest-black)
+![Next.js](https://img.shields.io/badge/Next.js-16-black) ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue) ![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4) ![shadcn/ui](https://img.shields.io/badge/shadcn%2Fui-latest-black) ![License](https://img.shields.io/badge/license-MIT-green)
 
 RazorShield AI is a dark-mode **risk operations command center** that turns fraud triage into a closed, auditable loop: transactions stream in live, the risk engine scores them, an AI investigator assembles evidence and recommends an action — and a human analyst confirms, notes, hands off, and exports the audit trail.
 
@@ -38,6 +38,19 @@ TRANSACTION → RISK DETECTION → EVIDENCE → AI INVESTIGATION
 - **Human action** — the analyst confirms through a "Confirm risk action?" modal (94% confidence shown), optionally adding a notebook entry (quick chips, `Alt+1-5`).
 - **Audit trail** — every AI step, handoff, and analyst action is timestamped and exportable (CSV includes notebook volume per case).
 
+## Dataset Studio — score your own data
+
+The demo feed proves the UI; **Dataset Studio** proves the engine. It accepts real payment data:
+
+1. **Import** — drop in any CSV/TSV export (up to 5 MB / 5,000 rows). Delimiter, quoting and BOM quirks are handled; there's a 50-row labeled sample file for a one-click start.
+2. **Map** — columns are auto-detected against the engine's fields (`amount`, `timestamp`, `customer_id`, `is_fraud`, …) with fuzzy header matching — payment exports name the same field a dozen different ways. Everything is editable before the run.
+3. **Score** — rows go to `POST /api/datasets/analyze`; the deterministic engine (`rse-1.2`, `src/lib/riskEngine.ts`) builds per-customer baselines and scores every row against 10 rules: high value, structuring (threshold-hugging amounts), customer-relative amount deviation, velocity bursts, impossible travel, location drift, first-seen devices, odd-hour activity, merchant outliers, payment-method switches. Each row gets an evidence-backed score, level and recommendation.
+4. **Measure** — when the file carries ground-truth labels, the run reports **precision, recall, F1, the confusion matrix and the rupee cost of both mistake types** (false alarms = wrongly frozen funds + ₹450 review ops each; missed fraud = the fraud loss). Unlabeled files still get volume analytics: score histogram, level mix, top firing signals.
+
+Every run is persisted in SQLite (Prisma) and re-openable from the run history. Alerts can be routed into the live investigation queue with one click — scored rows become real cases with the full workspace, notebook and audit trail. Scoring is deterministic: the same file always produces the same scores.
+
+On the built-in sample, the engine scores **P 85.7 / R 80.0 / F1 82.8** — it catches the velocity burst and the big-ticket fraud, honestly misses three low-signal fraud rows, and false-alarms on two legit high-value payments. That tension is the point: the dashboard prices every mistake instead of hiding it.
+
 ## What's inside
 
 ### Command center (overview)
@@ -56,7 +69,7 @@ Signal-level analytics view, and a model performance page (precision 91.4% / rec
 
 | Keys | Action | | Keys | Action |
 |---|---|---|---|---|
-| `⌘K` | Command palette / search | | `1–6` | Jump to view |
+| `⌘K` | Command palette / search | | `1–7` | Jump to view |
 | `/` | Quick search | | `J` / `K` | Move feed cursor |
 | `N` | Open newest high-risk case | | `↵` | Open highlighted txn |
 | `D` | Pattern digest | | `P` | Pause live stream |
@@ -71,12 +84,14 @@ Signal-level analytics view, and a model performance page (precision 91.4% / rec
 - **Next.js 16** (App Router, single-route SPA) + **TypeScript 5**
 - **Tailwind CSS 4** + **shadcn/ui** (New York) + Lucide icons
 - **framer-motion** (transitions), **recharts** (charts), **zustand** (state, persisted)
-- **Prisma** (SQLite) — schema and API route stubs ready for a real backend
+- **Prisma + SQLite** — Dataset Studio persists every analysis run server-side
 - **bun** as the runtime / package manager
 
-## Architecture note: backend-ready by design
+## Architecture: two data paths, one engine philosophy
 
-All data flows through a service abstraction (`src/services/api.ts`) over a deterministic mock data layer (`src/data/mockData.ts`). The flag `USE_REMOTE=false` currently serves mocks; flipping it to `true` routes the same typed contracts (`src/types/index.ts`) at the real endpoints (`/transactions`, `/risk/score`, `/investigations`, `/customers/:id`, `/risk/metrics`, `/model/performance`). Swapping in a real risk engine requires **no component changes** — only the service layer changes.
+**Live console** — all data flows through a service abstraction (`src/services/api.ts`) over a deterministic mock data layer (`src/data/mockData.ts`). The flag `USE_REMOTE=false` currently serves mocks; flipping it to `true` routes the same typed contracts (`src/types/index.ts`) at the real endpoints. Swapping in a live risk feed requires **no component changes** — only the service layer changes.
+
+**Dataset Studio** — a real server path end to end: `src/lib/csv.ts` (parse + map, client) → `POST /api/datasets/analyze` → `src/lib/riskEngine.ts` (scoring + metrics, server) → Prisma/SQLite persistence → typed results back to the dashboard. The engine is pure TypeScript with no I/O, so the same rules can run in a worker, a cron job, or another runtime unchanged.
 
 ## Getting started
 
@@ -92,39 +107,41 @@ Environment: `.env` holds only `DATABASE_URL` (local SQLite). A `.env.example` i
 
 ## Testing
 
-Static checks: `bun run lint` (ESLint) and `bunx tsc --noEmit` (strict TypeScript). Every UI surface is exercised manually across desktop and mobile widths before each release.
-
-Static checks: `bun run lint` (ESLint) and `bunx tsc --noEmit` (strict TypeScript). Every UI surface is exercised manually across desktop and mobile widths before each release.
+Static checks: `bun run lint` (ESLint) and `bunx tsc --noEmit` (strict TypeScript). Every UI surface is exercised manually across desktop and mobile widths before each release — boot, hero CTA, workspace flows, palette search, queue filters, the BLOCK confirm flow, CSV export, and the full Dataset Studio pipeline.
 
 ## Project structure
 
 ```
 src/
 ├── app/                    # Single-route SPA (page.tsx) + layout + design tokens (globals.css)
-│   └── api/                # Prisma-backed API route stubs (backend contract)
+│   └── api/datasets/       # Dataset Studio API: analyze, list, detail, delete (Prisma-backed)
 ├── components/
 │   ├── dashboard/          # Hero landing, overview, metrics, live feed
+│   ├── datastudio/         # Import wizard, column mapping, results dashboard
 │   ├── investigation/      # Workspace, AI investigator, notebook, audit trail, digest, print briefs
-│   ├── queue/              # Investigations queue, SLA chips, filters
 │   ├── risk/               # Risk intelligence, badges
 │   ├── model/              # Model performance
 │   ├── layout/             # App shell, sidebar, command palette, keyboard layer
 │   ├── ai/                 # AI activity indicator, status pill
+│   ├── shared/             # Shared primitives (status dots, SLA chips, states)
+│   ├── system/             # Engine & service health
+│   ├── transactions/       # Payment ledger + transaction detail
 │   └── ui/                 # shadcn/ui primitives
 ├── data/                   # Deterministic mock data (flagship case + demo arrival script)
-├── services/               # API abstraction (USE_REMOTE switch — mock ↔ real backend)
+├── lib/                    # riskEngine.ts (batch scorer) · csv.ts (parser/mapper) · format · db
+├── services/               # API abstraction (USE_REMOTE switch) + dataset client
 ├── store/                  # zustand store (view state, demo mode, decisions, personas)
-└── types/                  # Domain contracts mirroring the future backend
-prisma/                     # Schema (SQLite)
+└── types/                  # Domain contracts (core + dataset)
+prisma/                     # Schema (SQLite): Dataset + DatasetRow
 ```
 
 ## Roadmap
 
-- One-click **escalate** on SLA-breached cards (reassign to L3 lead, audited)
-- Breached-only prefiltered queue linked from the digest SLA stat
-- Jump-to-note highlight from palette search results
-- Accept-and-keep-persona variant for L3 leads reviewing other queues
-- Real-time risk-engine swap via `USE_REMOTE=true` (FastAPI service in progress)
+- Streaming CSV import (chunked upload) beyond the 5,000-row cap
+- Threshold sweep view — precision/recall across score cutoffs, not just the default
+- Per-signal ablation — recompute metrics with individual rules disabled
+- Cross-run diff — compare two imports of the same portfolio over time
+- Real-time risk-feed swap via `USE_REMOTE=true` for the live console
 
 ---
 

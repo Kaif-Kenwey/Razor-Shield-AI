@@ -1,8 +1,8 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// RazorShield AI — Prisma schema (SQLite)
+//
+// The Dataset Studio persists every analysis run so analysts can revisit
+// prior batch scores, compare metrics across files, and audit what the
+// engine did on a given day.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,20 +13,64 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+/// One uploaded batch of payment records + its aggregate metrics.
+model Dataset {
+  id             String   @id @default(cuid())
+  name           String
+  sourceFile     String
+  engineVersion  String
+  rowCount       Int
+  skippedCount   Int      @default(0)
+  flaggedCount   Int
+  avgScore       Float
+  /// Rupee value across rows flagged HOLD/BLOCK.
+  flaggedValue   Float    @default(0)
+  /// True when the file carried ground-truth fraud labels.
+  labelsPresent  Boolean  @default(false)
+  labeledCount   Int      @default(0)
+  truePositives  Int      @default(0)
+  falsePositives Int      @default(0)
+  falseNegatives Int      @default(0)
+  trueNegatives  Int      @default(0)
+  precision      Float    @default(0)
+  recall         Float    @default(0)
+  f1             Float    @default(0)
+  /// Rupee value of legit payments the engine would have frozen.
+  fpCost         Float    @default(0)
+  /// Rupee value of fraud the engine missed.
+  fnCost         Float    @default(0)
+  createdAt      DateTime @default(now())
+  rows           DatasetRow[]
+
+  @@index([createdAt])
 }
 
-model Post {
-  id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+/// One scored payment record inside a dataset.
+model DatasetRow {
+  id            String  @id @default(cuid())
+  dataset       Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  datasetId     String
+  rowIndex      Int
+  txnId         String
+  amount        Float
+  timestamp     String?
+  customerId    String
+  customerName  String  @default("")
+  merchant      String  @default("")
+  location      String  @default("")
+  device        String  @default("")
+  paymentMethod String  @default("")
+  /// 1 = fraud, 0 = legit, null = unlabeled.
+  label         Int?
+  riskScore     Float
+  riskLevel     String
+  recommendation String
+  /// Fired signals, JSON-encoded [{ type, title, evidence, severity, impact, facts }].
+  signalsJson   String  @default("[]")
+  /// tp / fp / fn / tn when labeled.
+  outcome       String?
+  warnings      String  @default("[]")
+
+  @@index([datasetId])
+  @@index([datasetId, riskLevel])
 }

@@ -223,7 +223,7 @@ export function InvestigationView() {
                 }
                 handoffAccepted={
                   assignment && assignedAnalyst && assignment.acceptedAt
-                    ? { analystName: assignedAnalyst.name, at: assignment.acceptedAt }
+                    ? { analystName: assignedAnalyst.name, at: assignment.acceptedAt, keepPersona: assignment.keepPersona }
                     : null
                 }
                 escalation={

@@ -9,11 +9,13 @@ import { motion } from "framer-motion";
 import {
   AlertOctagon,
   AlertTriangle,
+  ArrowLeftRight,
   Clock,
   DollarSign,
   Globe2,
   Info,
   MapPin,
+  Scissors,
   Smartphone,
   Store,
 } from "lucide-react";
@@ -38,6 +40,8 @@ const TYPE_ICON: Record<SignalType, LucideIcon> = {
   HIGH_VALUE: DollarSign,
   MERCHANT_RISK: Store,
   TIME_ANOMALY: Clock,
+  METHOD_MISMATCH: ArrowLeftRight,
+  STRUCTURING: Scissors,
 };
 
 export function SignalCard({

@@ -16,6 +16,7 @@ import {
   ArrowRight,
   BarChart3,
   Cpu,
+  FileUp,
   FolderSearch,
   LayoutGrid,
   Newspaper,
@@ -45,6 +46,7 @@ const NAV_ITEMS: { key: ViewKey; label: string; icon: typeof LayoutGrid }[] = [
   { key: "overview", label: "Overview — Risk Command Center", icon: LayoutGrid },
   { key: "investigations", label: "Investigations — Case Queue", icon: FolderSearch },
   { key: "transactions", label: "Transactions — Payment Ledger", icon: ArrowLeftRight },
+  { key: "datastudio", label: "Dataset Studio — Import & Score Real Data", icon: FileUp },
   { key: "intelligence", label: "Risk Intelligence — Patterns", icon: BarChart3 },
   { key: "model", label: "Model Performance — v1.0", icon: Cpu },
   { key: "system", label: "System — Engine Health", icon: Server },
@@ -169,12 +171,19 @@ export function CommandPalette() {
     return { byAnalyst, unassigned, breached };
   }, [transactions, decisions, assignments]);
 
+  /* Single close path — clears the query so the palette never reopens
+     filtered by a stale search (cmdk keeps the last query in state). */
+  const close = useCallback(() => {
+    setOpen(false);
+    setQuery("");
+  }, []);
+
   const go = useCallback(
     (key: ViewKey) => {
       navigate(key);
-      setOpen(false);
+      close();
     },
-    [navigate]
+    [navigate, close]
   );
 
   const openDetail = openTransactionDetail;
@@ -191,9 +200,9 @@ export function CommandPalette() {
           ? `${focusTxnId} · ${analyst.role.replace(" · you", " — that's you")} — handoff recorded in the audit trail.`
           : `${focusTxnId} is back in the unassigned pool.`,
       });
-      setOpen(false);
+      close();
     },
-    [focusTxnId, toast]
+    [focusTxnId, toast, close]
   );
 
   const actAs = useCallback(
@@ -201,13 +210,13 @@ export function CommandPalette() {
       const s = useAppStore.getState();
       const analyst = ANALYSTS.find((a) => a.id === analystId);
       s.setSignedInAnalyst(analystId);
-      setOpen(false);
+      close();
       toast({
         title: `Now acting as ${analyst?.name ?? analystId} (${analyst?.level ?? ""})`,
         description: "Decisions and notebook entries will carry this identity — switching is itself audit-logged.",
       });
     },
-    [toast]
+    [toast, close]
   );
 
   return (
@@ -237,7 +246,7 @@ export function CommandPalette() {
                   /* spotlight the entry in the notebook — scroll + flash on arrival */
                   useAppStore.getState().setHighlightNoteId(n.id);
                   openInvestigation(n.txnId);
-                  setOpen(false);
+                  close();
                 }}
                 className="gap-3"
               >
@@ -270,7 +279,7 @@ export function CommandPalette() {
                   value={`${t.id} ${t.customerId} ${t.customerName} ${t.location} ${t.merchant}`}
                   onSelect={() => {
                     openInvestigation(t.id);
-                    setOpen(false);
+                    close();
                   }}
                   className="gap-3"
                 >
@@ -291,7 +300,7 @@ export function CommandPalette() {
             value="open pattern digest brief weekly stats"
             onSelect={() => {
               useAppStore.getState().setDigestOpen(true);
-              setOpen(false);
+              close();
             }}
             className="gap-3"
           >
@@ -304,7 +313,7 @@ export function CommandPalette() {
             onSelect={() => {
               const s = useAppStore.getState();
               s.setSoundEnabled(!s.soundEnabled);
-              setOpen(false);
+              close();
               toast({
                 title: s.soundEnabled ? "Critical-alert chime muted" : "Critical-alert chime armed",
                 description: s.soundEnabled
@@ -329,7 +338,7 @@ export function CommandPalette() {
             onSelect={() => {
               const s = useAppStore.getState();
               s.setStreamPaused(!s.streamPaused);
-              setOpen(false);
+              close();
               toast({
                 title: s.streamPaused ? "Live stream resumed" : "Live stream paused",
                 description: s.streamPaused
@@ -369,7 +378,7 @@ export function CommandPalette() {
                   const s = useAppStore.getState();
                   s.setQueueAssignee(a.id);
                   s.navigate("investigations");
-                  setOpen(false);
+                  close();
                   toast({
                     title: `Queue filtered — ${a.name}`,
                     description: `Showing the ${count} open case(s) assigned to ${a.name}. Clear the violet filter chip to see everything.`,
@@ -403,7 +412,7 @@ export function CommandPalette() {
               const s = useAppStore.getState();
               s.setQueueAssignee("__unassigned");
               s.navigate("investigations");
-              setOpen(false);
+              close();
               toast({
                 title: "Queue filtered — unassigned pool",
                 description: `Showing ${queueCounts.unassigned} open case(s) awaiting handoff.`,
@@ -432,7 +441,7 @@ export function CommandPalette() {
               s.setQueueBreachFilter(true);
               s.setQueueAssignee(null);
               s.navigate("investigations");
-              setOpen(false);
+              close();
               toast({
                 title: "Queue filtered — SLA breached",
                 description: `Showing the ${queueCounts.breached} open case(s) past the ${SLA_BREACH_MINUTES}-minute escalation threshold.`,
@@ -552,7 +561,7 @@ export function CommandPalette() {
               value={`${t.id} ${t.customerId} ${t.customerName} ${t.location} ${t.merchant} ${t.status}`}
               onSelect={() => {
                 openDetail(t.id);
-                setOpen(false);
+                close();
               }}
               className="gap-3"
             >

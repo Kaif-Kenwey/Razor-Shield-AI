@@ -20,6 +20,7 @@ const SECTION_LABEL: Record<ViewKey, string> = {
   overview: "Risk Command Center",
   investigations: "Investigation Queue",
   transactions: "Transaction Ledger",
+  datastudio: "Dataset Studio",
   intelligence: "Risk Intelligence",
   model: "Model Performance",
   system: "System Health",

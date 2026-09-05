@@ -7,7 +7,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronRight, FolderSearch, Pause, Play } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronRight, FolderSearch, Pause, Play, Star } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { RiskLevelBadge, StatusBadge } from "@/components/risk/RiskBadge";
 import { InlineScore } from "@/components/risk/RiskScoreDial";
@@ -18,11 +18,12 @@ import { formatINR, relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { RiskLevel, Transaction } from "@/types";
 
-type FilterKey = "ALL" | "HIGH" | "MEDIUM" | "LOW" | "INVESTIGATING" | "BLOCKED";
+type FilterKey = "ALL" | "WATCHED" | "HIGH" | "MEDIUM" | "LOW" | "INVESTIGATING" | "BLOCKED";
 type SortKey = "time" | "risk" | "amount";
 
 const FILTERS: { key: FilterKey; label: string }[] = [
   { key: "ALL", label: "All" },
+  { key: "WATCHED", label: "★ Watched" },
   { key: "HIGH", label: "High Risk" },
   { key: "MEDIUM", label: "Medium Risk" },
   { key: "LOW", label: "Low Risk" },
@@ -30,10 +31,12 @@ const FILTERS: { key: FilterKey; label: string }[] = [
   { key: "BLOCKED", label: "Blocked" },
 ];
 
-function matchesFilter(t: Transaction, f: FilterKey): boolean {
+function matchesFilter(t: Transaction, f: FilterKey, watchlist: Record<string, true>): boolean {
   switch (f) {
     case "ALL":
       return true;
+    case "WATCHED":
+      return Boolean(watchlist[t.id]);
     case "HIGH":
       return t.riskLevel === "HIGH" || t.riskLevel === "CRITICAL";
     case "MEDIUM":
@@ -86,6 +89,7 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
   const demoMode = useAppStore((s) => s.demoMode);
   const streamPaused = useAppStore((s) => s.streamPaused);
   const setStreamPaused = useAppStore((s) => s.setStreamPaused);
+  const watchlist = useAppStore((s) => s.watchlist);
   const openInvestigation = useAppStore((s) => s.openInvestigation);
   const openDetail = useAppStore((s) => s.openTransactionDetail);
   const onRowClick = clickMode === "detail" ? openDetail : openInvestigation;
@@ -113,7 +117,7 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
   }
 
   const rows = useMemo(() => {
-    const filtered = transactions.filter((t) => matchesFilter(t, filter));
+    const filtered = transactions.filter((t) => matchesFilter(t, filter, watchlist));
     const dir = sortDir === "asc" ? 1 : -1;
     return [...filtered].sort((a, b) => {
       switch (sortKey) {
@@ -125,13 +129,14 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
           return (new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()) * dir;
       }
     });
-  }, [transactions, filter, sortKey, sortDir, tick]);
+  }, [transactions, filter, sortKey, sortDir, tick, watchlist]);
 
   const visible = compact ? rows.slice(0, 9) : rows;
 
   const counts = useMemo(() => {
-    const c: Record<FilterKey, number> = { ALL: transactions.length, HIGH: 0, MEDIUM: 0, LOW: 0, INVESTIGATING: 0, BLOCKED: 0 };
+    const c: Record<FilterKey, number> = { ALL: transactions.length, WATCHED: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INVESTIGATING: 0, BLOCKED: 0 };
     for (const t of transactions) {
+      if (watchlist[t.id]) c.WATCHED++;
       if (t.riskLevel === "HIGH" || t.riskLevel === "CRITICAL") c.HIGH++;
       else if (t.riskLevel === "MEDIUM") c.MEDIUM++;
       else if (t.riskLevel === "LOW") c.LOW++;
@@ -139,7 +144,7 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
       if (t.status === "BLOCKED") c.BLOCKED++;
     }
     return c;
-  }, [transactions]);
+  }, [transactions, watchlist]);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
@@ -237,14 +242,16 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
               aria-selected={filter === f.key}
               onClick={() => setFilter(f.key)}
               className={cn(
-                "rounded-sm border px-2 py-1 micro text-slate-500 transition-colors",
+                "rounded-sm border px-2 py-1 micro text-slate-500 transition-all active:scale-[0.97]",
                 filter === f.key
                   ? "border-line-strong bg-surface-3 text-slate-100"
                   : "border-transparent hover:bg-surface-2 hover:text-slate-300"
               )}
             >
               {f.label}
-              <span className="num ml-1.5 text-[9.5px] text-slate-600">{counts[f.key]}</span>
+              <span className={cn("num ml-1.5 text-[9.5px]", f.key === "WATCHED" && counts[f.key] > 0 && filter !== f.key ? "text-risk-medium/90" : "text-slate-600")}>
+                {counts[f.key]}
+              </span>
             </button>
           ))}
         </div>
@@ -312,8 +319,17 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
                       >
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
-                            <span className={cn("h-3.5 w-0.5 rounded-full", isEvaluating ? "bg-slate-600" : hot ? "bg-risk-critical" : t.riskLevel === "HIGH" ? "bg-risk-high" : t.riskLevel === "MEDIUM" ? "bg-risk-medium" : "bg-risk-low/60")} />
+                            <span className={cn("relative h-3.5 w-0.5 rounded-full", isEvaluating ? "bg-slate-600" : hot ? "bg-risk-critical" : t.riskLevel === "HIGH" ? "bg-risk-high" : t.riskLevel === "MEDIUM" ? "bg-risk-medium" : "bg-risk-low/60")}>
+                              {hot && !isEvaluating && (
+                                <span className="absolute inset-0 animate-ping rounded-full bg-risk-critical opacity-60" aria-hidden />
+                              )}
+                            </span>
                             <span className="num text-[12.5px] font-medium text-slate-200 group-hover:text-white">{t.id}</span>
+                            {watchlist[t.id] && (
+                              <span title="On your watchlist" aria-label={`${t.id} is on the watchlist`}>
+                                <Star className="h-3 w-3 fill-current text-risk-medium drop-shadow-[0_0_4px_rgba(251,191,36,0.55)]" aria-hidden />
+                              </span>
+                            )}
                           </div>
                           <p className="mt-0.5 pl-[10px] text-[11px] text-slate-500 lg:hidden">{t.customerId} · {t.location}</p>
                         </td>

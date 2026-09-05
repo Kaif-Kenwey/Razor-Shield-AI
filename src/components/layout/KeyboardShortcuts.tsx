@@ -4,7 +4,7 @@
  * KEYBOARD LAYER — analyst-grade keyboard control.
  *
  *   ⌘K /  command palette        ?   shortcut cheat-sheet
- *   1–6    switch sections        n   open newest high-risk case
+ *   1–7    switch sections        n   open newest high-risk case
  *   p      pause / resume stream  Esc close overlays (Radix)
  *   j / k  feed cursor (LiveFeed) Enter open highlighted row
  *
@@ -37,9 +37,10 @@ const SECTION_KEYS: Record<string, ViewKey> = {
   "1": "overview",
   "2": "investigations",
   "3": "transactions",
-  "4": "intelligence",
-  "5": "model",
-  "6": "system",
+  "4": "datastudio",
+  "5": "intelligence",
+  "6": "model",
+  "7": "system",
 };
 
 export function KeyboardShortcuts() {
@@ -59,7 +60,7 @@ export function KeyboardShortcuts() {
 
       const s = useAppStore.getState();
 
-      // 1–6 — switch sections
+      // 1–7 — switch sections
       const section = SECTION_KEYS[e.key];
       if (section) {
         e.preventDefault();
@@ -146,9 +147,10 @@ const SHORTCUT_GROUPS: {
       { keys: ["1"], label: "Command center", icon: Hash },
       { keys: ["2"], label: "Investigations queue", icon: Hash },
       { keys: ["3"], label: "Transaction ledger", icon: Hash },
-      { keys: ["4"], label: "Risk intelligence", icon: Hash },
-      { keys: ["5"], label: "Model performance", icon: Hash },
-      { keys: ["6"], label: "System health", icon: Hash },
+      { keys: ["4"], label: "Dataset Studio", icon: Hash },
+      { keys: ["5"], label: "Risk intelligence", icon: Hash },
+      { keys: ["6"], label: "Model performance", icon: Hash },
+      { keys: ["7"], label: "System health", icon: Hash },
     ],
   },
   {

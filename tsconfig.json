@@ -37,8 +37,6 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules",
-    "examples",
-    "skills"
+    "node_modules"
   ]
 }

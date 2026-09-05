@@ -120,6 +120,30 @@ function instantiate(type: SignalType, id: string): RiskSignal {
 }
 
 const SIGNAL_LIBRARY: Record<SignalType, SignalTemplate> = {
+  METHOD_MISMATCH: {
+    type: "METHOD_MISMATCH",
+    title: "Payment Method Switch",
+    evidence: "Paid via a rail this customer has never used before.",
+    severity: "MEDIUM",
+    impact: 12,
+    facts: [
+      { label: "This txn", value: "Set per transaction" },
+      { label: "Usual rail", value: "From customer history" },
+    ],
+    build: (s) => instantiate("METHOD_MISMATCH", `sig_${s}_mm`),
+  },
+  STRUCTURING: {
+    type: "STRUCTURING",
+    title: "Threshold-Hugging Amount",
+    evidence: "Amount sits just under a common review threshold.",
+    severity: "HIGH",
+    impact: 18,
+    facts: [
+      { label: "Amount", value: "Set per transaction" },
+      { label: "Pattern", value: "just-under-threshold" },
+    ],
+    build: (s) => instantiate("STRUCTURING", `sig_${s}_st`),
+  },
   NEW_DEVICE: {
     type: "NEW_DEVICE",
     title: "New Device",
