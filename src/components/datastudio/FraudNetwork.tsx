@@ -10,7 +10,7 @@
  */
 
 import { useMemo, useState } from "react";
-import { Network, ShieldAlert } from "lucide-react";
+import { Network, ShieldAlert, TriangleAlert } from "lucide-react";
 import { detectFraudRings, type FraudRing } from "@/lib/fraudGraph";
 import { formatINR } from "@/lib/format";
 import type { ScoredRow } from "@/types/dataset";
@@ -151,7 +151,19 @@ export function FraudNetwork({ rows }: { rows: ScoredRow[] }) {
         </span>
       </div>
 
-      {ring && hot && (
+      {ring && ring.degenerate && (
+        <div className="mt-3 flex items-start gap-2 rounded-sm border border-risk-medium/35 bg-risk-medium/8 px-3 py-2.5">
+          <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-risk-medium" aria-hidden />
+          <p className="micro-11 leading-relaxed text-risk-medium">
+            Broad device reuse, not a ring — this cluster spans {ring.members.length} of the run's accounts
+            ({Math.round(ring.portfolioShare * 100)}% of the portfolio) because the file repeats a handful of
+            device identifiers. That usually means fuzzy device strings or shared/family devices, not coordinated
+            fraud. Tighten device identifiers and re-run before treating this as one case.
+          </p>
+        </div>
+      )}
+
+      {ring && hot && !ring.degenerate && (
         <div className="mt-3 flex items-start gap-2 rounded-sm border border-risk-critical/35 bg-risk-critical/8 px-3 py-2.5">
           <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-risk-critical" aria-hidden />
           <p className="micro-11 leading-relaxed text-risk-critical">
@@ -187,6 +199,7 @@ export function FraudNetwork({ rows }: { rows: ScoredRow[] }) {
               <div className="flex items-center justify-between gap-2">
                 <span className="micro-11 font-semibold text-slate-200">
                   RING {String(i + 1).padStart(2, "0")} · {r.members.length} accounts
+                  {r.degenerate && <span className="ml-1.5 text-risk-medium">· broad device reuse</span>}
                 </span>
                 <span
                   className={cn(

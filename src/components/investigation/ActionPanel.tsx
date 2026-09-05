@@ -135,7 +135,7 @@ export function ActionPanel({
 
       {/* Confirm modal */}
       <Dialog open={pending !== null} onOpenChange={(o) => !o && setPending(null)}>
-        <DialogContent className="border-line bg-popover sm:max-w-md">
+        <DialogContent className="max-h-[85dvh] overflow-y-auto border-line bg-popover sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2.5 text-slate-50">
               <span className="flex h-7 w-7 items-center justify-center rounded-sm border border-risk-critical/40 bg-risk-critical/10">

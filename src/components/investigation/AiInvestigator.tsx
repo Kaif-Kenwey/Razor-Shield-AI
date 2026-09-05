@@ -91,10 +91,10 @@ export function AiInvestigator({
               title={
                 investigation.mode === "llm"
                   ? `Analysis produced by the LLM investigator (${investigation.modelLabel ?? "llm"}) on top of the rules-engine evidence`
-                  : "LLM not configured — analysis produced by the deterministic heuristic engine"
+                  : "No LLM endpoint configured or reachable — analysis produced by the deterministic heuristic engine"
               }
             >
-              {investigation.mode === "llm" ? `LLM AGENT · ${investigation.modelLabel ?? "llm"}` : "HEURISTIC ENGINE"}
+              {investigation.mode === "llm" ? `LLM AGENT · ${investigation.modelLabel ?? "llm"}` : "HEURISTIC · LLM UNAVAILABLE"}
             </span>
           )}
           {!analyzing && complete && (

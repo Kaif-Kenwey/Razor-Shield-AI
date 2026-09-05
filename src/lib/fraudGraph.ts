@@ -20,6 +20,13 @@
  * Extension path (schema permitting): link on phone, email hash, IP,
  * address and card fingerprints exactly the same way — the graph code
  * only needs another edge source.
+ *
+ * Known failure mode, handled explicitly: if a file reuses a handful of
+ * device strings across most of the portfolio (fuzzy exports, shared
+ * family devices, test data), union-find merges nearly EVERY account into
+ * one giant component. That is an infrastructure artifact, not a ring —
+ * such clusters are flagged `degenerate` (≥40% of all accounts in the
+ * run AND ≥10 members) so the UI can say so instead of crying wolf.
  */
 
 import type { ScoredRow } from "@/types/dataset";
@@ -51,6 +58,11 @@ export interface FraudRing {
   windowEnd: string | null;
   /** Analyst-facing bullets — each one grounded in the rows. */
   evidence: string[];
+  /** Share of all accounts in the run that sit inside this cluster (0–1). */
+  portfolioShare: number;
+  /** True when the cluster spans most of the portfolio — broad device
+   *  reuse, almost certainly a data artifact rather than a targeted ring. */
+  degenerate: boolean;
 }
 
 interface Edge {
@@ -67,6 +79,8 @@ const isRealDevice = (d: string) => {
 };
 
 export function detectFraudRings(rows: ScoredRow[]): FraudRing[] {
+  const totalAccounts = new Set(rows.map((r) => r.customerId).filter(Boolean)).size;
+
   /* 1 — shared infrastructure index */
   const byDevice = new Map<string, Edge>();
   for (const r of rows) {
@@ -192,6 +206,9 @@ export function detectFraudRings(rows: ScoredRow[]): FraudRing[] {
       );
     }
 
+    const portfolioShare = totalAccounts > 0 ? members.size / totalAccounts : 0;
+    const degenerate = portfolioShare >= 0.4 && members.size >= 10;
+
     rings.push({
       id: `RING-${[...members].sort()[0]}`,
       members: [...perCustomer.values()].sort((a, b) => b.totalAmount - a.totalAmount),
@@ -207,6 +224,8 @@ export function detectFraudRings(rows: ScoredRow[]): FraudRing[] {
       windowStart: times[0]?.toISOString() ?? null,
       windowEnd: times[times.length - 1]?.toISOString() ?? null,
       evidence,
+      portfolioShare,
+      degenerate,
     });
   }
 

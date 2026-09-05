@@ -10,6 +10,12 @@ RazorShield AI is a dark-mode **risk operations command center** that turns frau
 
 Every recommendation stays **human-gated**: the AI investigates and recommends (ALLOW / REVIEW / HOLD / BLOCK with a confidence score), the analyst decides, and the system records who did what, when, and why.
 
+## Why this exists
+
+Most fraud tooling stops at a score. An analyst gets a number, a queue, and no context — the customer history has to be pulled by hand, the alert argued with, and the write-up done after the fact. Worse, a row-level score physically cannot see a fraud ring: five accounts that each look unremarkable in isolation, all sharing one burner device.
+
+RazorShield AI puts the whole loop in one workspace instead of four tabs. The rule engine produces structured evidence, the LLM investigates that evidence and recommends an action, similar closed cases are recalled as precedent, coordinated fraud is caught at the entity-graph level, and the analyst — never the model — signs the decision into an audit trail. That separation is deliberate: the engine owns evidence, the AI owns interpretation, the human owns the decision.
+
 ---
 
 ## The demo case
@@ -82,6 +88,7 @@ Three tools live under the scored results, because a score without instruments i
 - The live console feed is a deterministic demo script, not a real gateway — swapping in a live source is a service-layer change by design.
 - The sample dataset is 58 rows. Every percentage on it is a demonstration of method, not statistical proof; bring a real file.
 - The fraud-graph currently links on shared device fingerprints; adding IP/email/address edges is roadmap work.
+- Persistence is local-first SQLite — right for the demo, not for scale. A production deployment would swap it for managed PostgreSQL (the Prisma schema ports as-is); nothing else in the app assumes a single machine.
 
 ## Tech stack
 

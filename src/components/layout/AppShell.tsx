@@ -27,7 +27,7 @@ function Footer() {
           <kbd className="inline-flex h-4.5 items-center rounded border border-line bg-surface-2 px-1.5 num text-[9.5px] text-slate-400" title="Press ? to view all keyboard shortcuts">?</kbd>
           <span className="text-slate-700">·</span>
           <StatusDot tone="violet" pulse />
-          <span>Demo environment · synthetic data only · v1.2</span>
+          <span>Demo environment · synthetic data only · v1.4.1</span>
         </p>
       </div>
     </footer>
