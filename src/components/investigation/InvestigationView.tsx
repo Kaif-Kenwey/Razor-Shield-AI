@@ -23,52 +23,15 @@ import { StatusDot } from "@/components/shared/StatusDot";
 import { EmptyState } from "@/components/shared/States";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/store/appStore";
-import { ANALYSTS, customerFor, buildInvestigation } from "@/data/mockData";
+import { ANALYSTS, customerFor } from "@/data/mockData";
+import {
+  MIN_THEATER_MS,
+  deriveConclusion,
+  heuristicInvestigation,
+  runAgentInvestigation,
+} from "@/lib/agent/runAgent";
 import { cn } from "@/lib/utils";
-import type { Investigation, Transaction } from "@/types";
-
-/* ------------------------------------------------------------------ */
-/* AI conclusion derivation (analyst-facing only)                      */
-/* ------------------------------------------------------------------ */
-
-const SIGNAL_CLAUSE: Record<string, string> = {
-  NEW_DEVICE: "the device has not previously been associated with the account",
-  UNUSUAL_AMOUNT: "the amount is well above the customer's typical range",
-  LOCATION_ANOMALY: "the origin location is inconsistent with recent activity",
-  VELOCITY_SPIKE: "a short burst of transactions was detected",
-  IMPOSSIBLE_TRAVEL: "successive activity implies physically impossible travel",
-  HIGH_VALUE: "the amount crosses the elevated-value policy threshold",
-  MERCHANT_RISK: "the merchant category shows elevated chargeback rates",
-  TIME_ANOMALY: "the payment occurs outside the customer's usual activity window",
-};
-
-function deriveConclusion(txn: Transaction): {
-  aiSummary: string;
-  recommendation: Transaction["recommendation"];
-  confidence: number;
-} {
-  const clauses = txn.signals
-    .map((s) => SIGNAL_CLAUSE[s.type])
-    .filter(Boolean);
-
-  const level = txn.riskLevel;
-  const tail =
-    level === "CRITICAL"
-      ? " Multiple independent signals converge, so an immediate bounded action is recommended."
-      : level === "HIGH"
-        ? " Correlated signals suggest elevated exposure; analyst review is recommended before settlement."
-        : level === "MEDIUM"
-          ? " The deviation is moderate; a review is suggested but the pattern is not conclusive."
-          : " The transaction is consistent with the customer's established behavior and requires no action.";
-
-  return {
-    aiSummary: `This transaction deviates from the customer's historical behavior${clauses.length ? ": " + clauses.join("; ") : "."}${tail}`,
-    recommendation:
-      txn.recommendation ??
-      (level === "CRITICAL" ? "BLOCK" : level === "HIGH" ? "REVIEW" : level === "MEDIUM" ? "REVIEW" : "ALLOW"),
-    confidence: Math.round(Math.min(96, 58 + txn.riskScore * 0.4)),
-  };
-}
+import type { Transaction } from "@/types";
 
 /* ------------------------------------------------------------------ */
 /* View                                                                */
@@ -95,6 +58,7 @@ export function InvestigationView() {
   const [step, setStep] = useState(0);
   const [timelineCount, setTimelineCount] = useState(0);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const agentKey = useRef<string | null>(null);
 
   const customer = useMemo(() => (txn ? customerFor(txn) : null), [txn]);
 
@@ -125,21 +89,35 @@ export function InvestigationView() {
     for (let i = 1; i <= 7; i++) {
       timers.current.push(setTimeout(() => setTimelineCount(i), i * TIMELINE_MS));
     }
+
+    /* The REAL agent runs while the staged sequence plays: evidence is
+     * POSTed to /api/investigate, the configured LLM returns a validated
+     * verdict, and the heuristic engine stands by as an honest fallback.
+     * The runner owns phase completion (after min-theater pacing). */
+    if (agentKey.current !== txn.id) {
+      agentKey.current = txn.id;
+      void runAgentInvestigation(txn.id).catch(() => {});
+    }
+
+    /* Belt-and-braces: even if everything above fails, the case can
+     * never hang in "analyzing". */
     timers.current.push(
       setTimeout(() => {
-        setPhase(txn.id, "complete");
         const s = useAppStore.getState();
-        const current = s.transactions.find((t) => t.id === txn.id);
-        if (current && !current.investigation) {
-          const d = deriveConclusion(current);
-          s.updateTransaction(txn.id, {
-            aiSummary: d.aiSummary,
-            recommendation: d.recommendation,
-            confidence: d.confidence,
-            investigation: buildInvestigation(current, current.timestamp) as Investigation,
-          });
+        if (s.phases[txn.id] === "analyzing") {
+          const cur = s.transactions.find((t) => t.id === txn.id);
+          if (cur && !cur.investigation) {
+            const d = deriveConclusion(cur);
+            s.updateTransaction(txn.id, {
+              aiSummary: d.aiSummary,
+              recommendation: d.recommendation,
+              confidence: d.confidence,
+              investigation: heuristicInvestigation(cur),
+            });
+          }
+          s.setPhase(txn.id, "complete");
         }
-      }, totalSteps * STEP_MS + 500)
+      }, MIN_THEATER_MS + 30_000),
     );
 
     return () => {
@@ -174,9 +152,7 @@ export function InvestigationView() {
   const resolvedBy = decision?.analystId ? ANALYSTS.find((a) => a.id === decision.analystId)?.name : undefined;
   const shownInvestigation =
     investigation ??
-    (phase === "complete"
-      ? buildInvestigation(txn, txn.timestamp)
-      : null);
+    (phase === "complete" ? heuristicInvestigation(txn) : null);
 
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-5 lg:px-6">
@@ -310,7 +286,7 @@ export function InvestigationView() {
                   aiSummary: d.aiSummary,
                   recommendation: d.recommendation,
                   confidence: d.confidence,
-                  investigation: buildInvestigation(current, current.timestamp) as Investigation,
+                  investigation: heuristicInvestigation(current),
                 });
               }
             }}

@@ -48,7 +48,7 @@ const NAV_ITEMS: { key: ViewKey; label: string; icon: typeof LayoutGrid }[] = [
   { key: "transactions", label: "Transactions — Payment Ledger", icon: ArrowLeftRight },
   { key: "datastudio", label: "Dataset Studio — Import & Score Real Data", icon: FileUp },
   { key: "intelligence", label: "Risk Intelligence — Patterns", icon: BarChart3 },
-  { key: "model", label: "Model Performance — rse-1.2", icon: Cpu },
+  { key: "model", label: "Detection Benchmark — demo engine metrics", icon: Cpu },
   { key: "system", label: "System — Engine Health", icon: Server },
 ];
 

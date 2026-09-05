@@ -90,11 +90,11 @@ export function ModelPerformanceView() {
         <div>
           <p className="micro mb-1.5 text-slate-500">Detection engine</p>
           <h1 className="text-xl font-semibold tracking-tight text-slate-50 sm:text-2xl">
-            Model performance
+            Detection benchmark
           </h1>
         </div>
-        <span className="micro-11 rounded-sm border border-intel/30 bg-intel/10 px-2 py-1 text-intel">
-          Model {mp.modelVersion}
+        <span className="micro-11 rounded-sm border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-amber-300">
+          DEMO ENGINE BENCHMARK — not production ML performance
         </span>
       </motion.header>
 

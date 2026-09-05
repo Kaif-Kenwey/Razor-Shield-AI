@@ -161,6 +161,8 @@ export function useLiveTransactions() {
                     : "UNDER_REVIEW",
             investigation: {
               ...buildInvestigation(settled, now),
+              mode: "heuristic",
+              modelLabel: "rse-1.2 heuristics",
               analystAction: decided.action,
               analystNote: decided.note,
               resolvedAt: decided.at,

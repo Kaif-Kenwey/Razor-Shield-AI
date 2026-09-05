@@ -85,6 +85,22 @@ export interface Investigation {
   auditTrail: AuditEntry[];
   evidenceUsed: string[];
   reasoning: string;
+  /** Which investigator produced this analysis: LLM agent or rules heuristic. */
+  mode?: "llm" | "heuristic";
+  /** Model id when mode === "llm" (e.g. "glm-4-plus"), else engine label. */
+  modelLabel?: string;
+  /** Agent narrative for the case file — evidence → interpretation → action. */
+  riskStory?: string;
+  /** Facts that cut against the recommendation (agent finding). */
+  contradictingEvidence?: string[];
+  /** What better data would resolve (agent finding). */
+  uncertainties?: string[];
+  /** Decomposed confidence — makes "why 94%?" answerable. */
+  confidenceFactors?: {
+    evidenceAgreement: number;
+    dataCompleteness: number;
+    historicalPrecedent: number;
+  };
   /** Analyst's final bounded action, once taken. */
   analystAction?: RiskAction;
   analystNote?: string;

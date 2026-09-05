@@ -355,7 +355,7 @@ export function DataStudioView() {
                 Download sample dataset
               </Button>
               <span className="micro-11 text-slate-600">
-                50 labeled rows with velocity bursts, impossible travel, structuring — and honest false positives
+                58 labeled rows — velocity bursts, impossible travel, structuring, a five-account mule ring, and honest false positives
               </span>
             </div>
 

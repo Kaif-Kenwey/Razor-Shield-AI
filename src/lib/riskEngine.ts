@@ -379,19 +379,42 @@ export function scoreRecord(rec: EngineInput, stats: DatasetStats): {
   }
 
   /* --- device reputation ------------------------------------------ */
-  const deviceUses = stats.deviceFirstUse.get(rec.device) ?? 0;
-  if (rec.device && deviceUses <= 1) {
+  /* Two honest, distinct device evidences:
+   *  A) behavioral — the customer HAS prior history and this device is
+   *     first-seen for THEM (cold-start customers are exempt: with no
+   *     device history, "new" is not evidence).
+   *  B) infrastructure — the device is portfolio-rare (single use in the
+   *     file): a burner tell. Weaker per-customer evidence, labeled as
+   *     what it is; cross-account device sharing is escalated to the
+   *     entity-graph fraud-ring module. */
+  const priorRows = history; // customer's other transactions in the file
+  const customerDeviceUses = cp
+    ? cp.devices.filter((d) => d === rec.device).length - 1 // minus the row itself
+    : 0;
+  const portfolioUses = rec.device ? stats.deviceFirstUse.get(rec.device) ?? 0 : 0;
+  const newForCustomer = rec.device && customerDeviceUses <= 0 && priorRows >= 3;
+  const portfolioRare = rec.device && portfolioUses <= 1;
+  if (rec.device && (newForCustomer || portfolioRare)) {
     signals.push(
       signal(
         "NEW_DEVICE",
-        "First-seen device",
-        `Device "${rec.device}" appears once in the entire file — unseen-device risk on a ${inr(rec.amount)} payment.`,
-        deviceUses === 0 ? "LOW" : "MEDIUM",
+        newForCustomer ? "First-seen device for this customer" : "Unrecognized device (single use in file)",
+        newForCustomer
+          ? `Device "${rec.device}" has no prior history for ${rec.customerId} across ${priorRows} earlier transactions${portfolioRare ? " and appears nowhere else in the file" : ""} — unseen-device risk on a ${inr(rec.amount)} payment.`
+          : `Device "${rec.device}" appears exactly once in the whole file and has no customer history — burner-device pattern on a ${inr(rec.amount)} payment.`,
+        newForCustomer ? "MEDIUM" : "LOW",
         WEIGHTS.newDevice,
-        [
-          { label: "Device", value: rec.device },
-          { label: "Seen in file", value: `${deviceUses}×` },
-        ],
+        newForCustomer
+          ? [
+              { label: "Device", value: rec.device },
+              { label: "Usual device", value: cp?.usualDevice || "—" },
+              { label: "Prior uses (customer)", value: "0" },
+            ]
+          : [
+              { label: "Device", value: rec.device },
+              { label: "Seen in file", value: `${portfolioUses}×` },
+              { label: "Customer history", value: `${priorRows} prior txns` },
+            ],
       ),
     );
   }

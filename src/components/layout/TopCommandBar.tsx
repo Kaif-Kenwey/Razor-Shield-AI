@@ -22,7 +22,7 @@ const SECTION_LABEL: Record<ViewKey, string> = {
   transactions: "Transaction Ledger",
   datastudio: "Dataset Studio",
   intelligence: "Risk Intelligence",
-  model: "Model Performance",
+  model: "Detection Benchmark",
   system: "System Health",
   investigation: "Investigation Workspace",
   "transaction-detail": "Transaction Detail",

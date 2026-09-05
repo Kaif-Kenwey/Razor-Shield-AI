@@ -23,7 +23,7 @@ const NAV: { key: ViewKey; label: string; icon: LucideIcon; hint: string }[] = [
   { key: "transactions", label: "Transactions", icon: ArrowLeftRight, hint: "Full payment ledger" },
   { key: "datastudio", label: "Dataset Studio", icon: FileUp, hint: "Import & score real data" },
   { key: "intelligence", label: "Risk Intelligence", icon: BarChart3, hint: "Patterns & distributions" },
-  { key: "model", label: "Model Performance", icon: Cpu, hint: "Precision, recall, drift" },
+  { key: "model", label: "Detection Benchmark", icon: Cpu, hint: "Demo engine metrics" },
   { key: "system", label: "System", icon: Server, hint: "Engine & service health" },
 ];
 

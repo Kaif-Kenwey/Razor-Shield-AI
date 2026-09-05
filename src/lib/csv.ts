@@ -269,6 +269,16 @@ export function buildSampleCsv(): string {
     ["TXN_90048", "2026-01-12T13:15:00", "1320", "CUS_242", "Devansh Mehta", "Cafe Coffee Day", "Delhi", "iPhone-13-Q43", "Wallet", "0"],
     ["TXN_90049", "2026-01-12T14:41:00", "67500", "CUS_243", "Aarti Chauhan", "Goldsmith & Co", "Surat", "ThinkPad-R44", "Netbanking", "1"],
     ["TXN_90050", "2026-01-12T15:33:00", "540", "CUS_244", "Naveen Kumar", "IRCTC", "Chennai", "Poco-C65-S45", "UPI", "0"],
+    // Coordinated mule ring: five accounts rotating three burner devices,
+    // one merchant, tight window — the fraud-ring detector's demo case.
+    ["TXN_90051", "2026-01-12T13:05:00", "38500", "CUS_250", "Vikas Rana", "QuickMart Kiosk", "Ludhiana", "BURNER-A100", "Wallet", "1"],
+    ["TXN_90052", "2026-01-12T13:09:00", "41200", "CUS_251", "Pooja Rathi", "QuickMart Kiosk", "Ludhiana", "BURNER-A100", "Wallet", "1"],
+    ["TXN_90053", "2026-01-12T13:16:00", "46800", "CUS_252", "Deepak Salvi", "QuickMart Kiosk", "Ludhiana", "BURNER-B200", "Wallet", "1"],
+    ["TXN_90054", "2026-01-12T13:24:00", "35900", "CUS_253", "Heena Gavli", "QuickMart Kiosk", "Ludhiana", "BURNER-B200", "Wallet", "1"],
+    ["TXN_90055", "2026-01-12T13:41:00", "29800", "CUS_250", "Vikas Rana", "QuickMart Kiosk", "Ludhiana", "BURNER-A100", "Wallet", "0"],
+    ["TXN_90056", "2026-01-12T13:55:00", "52300", "CUS_254", "Omkar Wagh", "QuickMart Kiosk", "Nashik", "BURNER-A100", "Wallet", "1"],
+    ["TXN_90057", "2026-01-12T14:12:00", "44100", "CUS_251", "Pooja Rathi", "FuelPoint Fuels", "Ludhiana", "BURNER-B200", "Wallet", "1"],
+    ["TXN_90058", "2026-01-12T14:31:00", "1980", "CUS_252", "Deepak Salvi", "Chai Point", "Ludhiana", "BURNER-B200", "UPI", "0"],
   ];
   return [header, ...rows.map((r) => r.join(","))].join("\n");
 }

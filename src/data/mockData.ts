@@ -570,7 +570,7 @@ const flagship: Transaction = {
   confidence: 94,
 };
 
-flagship.investigation = buildInvestigation(flagship, flagship.timestamp);
+flagship.investigation = { ...buildInvestigation(flagship, flagship.timestamp), mode: "heuristic", modelLabel: "rse-1.2 heuristics" };
 
 /* Additional hand-crafted cases ------------------------------------ */
 
@@ -611,7 +611,7 @@ const caseA: Transaction = {
   recommendation: "BLOCK",
   confidence: 91,
 };
-caseA.investigation = buildInvestigation(caseA, caseA.timestamp);
+caseA.investigation = { ...buildInvestigation(caseA, caseA.timestamp), mode: "heuristic", modelLabel: "rse-1.2 heuristics" };
 
 const caseB: Transaction = {
   id: "TXN_9B04D1",
@@ -649,7 +649,7 @@ const caseB: Transaction = {
   recommendation: "REVIEW",
   confidence: 87,
 };
-caseB.investigation = buildInvestigation(caseB, caseB.timestamp);
+caseB.investigation = { ...buildInvestigation(caseB, caseB.timestamp), mode: "heuristic", modelLabel: "rse-1.2 heuristics" };
 
 const caseC: Transaction = {
   id: "TXN_5D18F7",
@@ -682,7 +682,7 @@ const caseC: Transaction = {
   recommendation: "REVIEW",
   confidence: 78,
 };
-caseC.investigation = buildInvestigation(caseC, caseC.timestamp);
+caseC.investigation = { ...buildInvestigation(caseC, caseC.timestamp), mode: "heuristic", modelLabel: "rse-1.2 heuristics" };
 
 /* ------------------------------------------------------------------ */
 /* Generated background traffic                                        */

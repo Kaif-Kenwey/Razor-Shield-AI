@@ -40,6 +40,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { RiskLevelBadge } from "@/components/risk/RiskBadge";
 import { StatusDot } from "@/components/shared/StatusDot";
+import { ThresholdLab } from "@/components/datastudio/ThresholdLab";
+import { FraudNetwork } from "@/components/datastudio/FraudNetwork";
 import { useToast } from "@/hooks/use-toast";
 import { useAppStore } from "@/store/appStore";
 import { formatINR, formatNumber } from "@/lib/format";
@@ -422,6 +424,7 @@ export function DatasetResults({
               </div>
             </div>
           </div>
+          <ThresholdLab rows={analysis.rows} />
         </motion.section>
       ) : (
         <section aria-label="Unlabeled notice" className="flex items-start gap-2 rounded-sm border border-line bg-surface-1 px-3 py-2.5">
@@ -433,6 +436,16 @@ export function DatasetResults({
           </p>
         </section>
       )}
+
+      {/* entity-graph ring detection — works with or without labels */}
+      <motion.section
+        aria-label="Fraud network"
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, delay: 0.1, ease: "easeOut" }}
+      >
+        <FraudNetwork rows={analysis.rows} />
+      </motion.section>
 
       {/* volume analytics */}
       <motion.section

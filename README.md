@@ -42,14 +42,14 @@ TRANSACTION → RISK DETECTION → EVIDENCE → AI INVESTIGATION
 
 The demo feed proves the UI; **Dataset Studio** proves the engine. It accepts real payment data:
 
-1. **Import** — drop in any CSV/TSV export (up to 5 MB / 5,000 rows). Delimiter, quoting and BOM quirks are handled; there's a 50-row labeled sample file for a one-click start.
+1. **Import** — drop in any CSV/TSV export (up to 5 MB / 5,000 rows). Delimiter, quoting and BOM quirks are handled; there's a 58-row labeled sample file for a one-click start — including a five-account mule ring the graph module is meant to catch.
 2. **Map** — columns are auto-detected against the engine's fields (`amount`, `timestamp`, `customer_id`, `is_fraud`, …) with fuzzy header matching — payment exports name the same field a dozen different ways. Everything is editable before the run.
-3. **Score** — rows go to `POST /api/datasets/analyze`; the deterministic engine (`rse-1.2`, `src/lib/riskEngine.ts`) builds per-customer baselines and scores every row against 10 rules: high value, structuring (threshold-hugging amounts), customer-relative amount deviation, velocity bursts, impossible travel, location drift, first-seen devices, odd-hour activity, merchant outliers, payment-method switches. Each row gets an evidence-backed score, level and recommendation.
+3. **Score** — rows go to `POST /api/datasets/analyze`; the deterministic engine (`rse-1.2`, `src/lib/riskEngine.ts`) builds per-customer baselines and scores every row against 10 rules: high value, structuring (threshold-hugging amounts), customer-relative amount deviation, velocity bursts, impossible travel, location drift, first-seen devices (per-customer first-seen and portfolio-rare burners are distinct signals), odd-hour activity, merchant outliers, payment-method switches. Each row gets an evidence-backed score, level and recommendation.
 4. **Measure** — when the file carries ground-truth labels, the run reports **precision, recall, F1, the confusion matrix and the rupee cost of both mistake types** (false alarms = wrongly frozen funds + ₹450 review ops each; missed fraud = the fraud loss). Unlabeled files still get volume analytics: score histogram, level mix, top firing signals.
 
 Every run is persisted in SQLite (Prisma) and re-openable from the run history. Alerts can be routed into the live investigation queue with one click — scored rows become real cases with the full workspace, notebook and audit trail. Scoring is deterministic: the same file always produces the same scores.
 
-On the built-in sample, the engine scores **P 85.7 / R 80.0 / F1 82.8** — it catches the velocity burst and the big-ticket fraud, honestly misses three low-signal fraud rows, and false-alarms on two legit high-value payments. That tension is the point: the dashboard prices every mistake instead of hiding it.
+On the built-in sample, the per-row engine scores **P 85.7 / R 57.1 / F1 68.6** — it catches the velocity burst and the big-ticket fraud, false-alarms on two legit high-value payments, and honestly misses nine fraud rows: six of them belong to the mule ring, where every account looks unremarkable in isolation. The entity-graph module links those accounts into **one cluster (5 accounts · 2 burner devices · ₹2.9L exposure, ring score 76)** — fraud that is invisible row-by-row and obvious as a graph. That division of labor is the point: rules price individual payments, the graph exposes coordination, the dashboard prices every mistake instead of hiding it.
 
 ## What's inside
 
@@ -62,8 +62,8 @@ Active / Watchlist / Resolved tabs, SLA tiers (amber *aging* at 15m, red *breach
 ### Investigation workspace
 Large animated risk score (92/100), recommendation panel with confidence, expandable AI reasoning, four evidence cards, customer intel with charts, similar cases, investigation timeline, analyst notebook with quick chips, and a full audit trail. Case file can be printed as a PDF brief.
 
-### Risk intelligence & model performance
-Signal-level analytics view, and a model performance page (precision 91.4% / recall 87.8% / F1 89.6% / ROC-AUC 94.1% + confusion matrix) — clearly labeled as a demo snapshot.
+### Risk intelligence & detection benchmark
+Signal-level analytics view, and a Detection Benchmark page (precision 91.4% / recall 87.8% / F1 89.6% / ROC-AUC 94.1% + confusion matrix) — explicitly badged as a demo engine benchmark, not production ML performance. The honest, measurable numbers live in Dataset Studio, computed from whatever labeled data you import.
 
 ### Analyst-grade keyboard control
 
@@ -120,7 +120,7 @@ src/
 │   ├── datastudio/         # Import wizard, column mapping, results dashboard
 │   ├── investigation/      # Workspace, AI investigator, notebook, audit trail, digest, print briefs
 │   ├── risk/               # Risk intelligence, badges
-│   ├── model/              # Model performance
+│   ├── model/              # Detection benchmark (demo snapshot, labeled as such)
 │   ├── layout/             # App shell, sidebar, command palette, keyboard layer
 │   ├── ai/                 # AI activity indicator, status pill
 │   ├── shared/             # Shared primitives (status dots, SLA chips, states)

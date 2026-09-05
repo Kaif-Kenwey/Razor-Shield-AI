@@ -9,9 +9,10 @@
 
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, ChevronDown, Copy, Sparkles } from "lucide-react";
+import { BookOpen, Check, ChevronDown, Copy, Scale, Sparkles } from "lucide-react";
 import { AiActivityIndicator } from "@/components/ai/AiActivityIndicator";
 import { StatusDot } from "@/components/shared/StatusDot";
+import { DecisionSensitivity } from "@/components/investigation/DecisionSensitivity";
 import { useToast } from "@/hooks/use-toast";
 import { formatINR } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -79,6 +80,23 @@ export function AiInvestigator({
           <h2 className="micro-11 font-semibold text-slate-100">AI Investigator</h2>
         </div>
         <div className="flex items-center gap-2">
+          {!analyzing && complete && investigation?.mode && (
+            <span
+              className={cn(
+                "micro-11 rounded-sm border px-1.5 py-0.5",
+                investigation.mode === "llm"
+                  ? "border-intel/40 bg-intel/10 text-intel"
+                  : "border-line bg-surface-1 text-slate-500",
+              )}
+              title={
+                investigation.mode === "llm"
+                  ? `Analysis produced by the LLM investigator (${investigation.modelLabel ?? "llm"}) on top of the rules-engine evidence`
+                  : "LLM not configured — analysis produced by the deterministic heuristic engine"
+              }
+            >
+              {investigation.mode === "llm" ? `LLM AGENT · ${investigation.modelLabel ?? "llm"}` : "HEURISTIC ENGINE"}
+            </span>
+          )}
           {!analyzing && complete && (
             <button
               onClick={copySummary}
@@ -141,10 +159,23 @@ export function AiInvestigator({
               transition={{ duration: 0.35, ease: "easeOut" }}
               className="mt-4 space-y-4"
             >
-              {/* Investigation summary */}
-              <p className="border-l-2 border-intel/40 pl-3 text-[13px] leading-relaxed text-slate-300">
-                {investigation?.reasoning ?? txn.aiSummary}
-              </p>
+              {/* Investigation summary — the agent's risk story when the LLM
+                  produced one, else the heuristic summary. */}
+              {investigation?.riskStory ? (
+                <div>
+                  <p className="micro mb-2 flex items-center gap-1.5 text-intel">
+                    <BookOpen className="h-3 w-3" aria-hidden />
+                    Risk story
+                  </p>
+                  <p className="border-l-2 border-intel/40 pl-3 text-[13px] leading-relaxed text-slate-300">
+                    {investigation.riskStory}
+                  </p>
+                </div>
+              ) : (
+                <p className="border-l-2 border-intel/40 pl-3 text-[13px] leading-relaxed text-slate-300">
+                  {investigation?.reasoning ?? txn.aiSummary}
+                </p>
+              )}
 
               {/* Evidence used */}
               <div>
@@ -167,6 +198,50 @@ export function AiInvestigator({
                 </ul>
               </div>
 
+              {/* Contradicting evidence — what cuts the other way */}
+              {(investigation?.contradictingEvidence?.length ?? 0) > 0 && (
+                <div className="rounded-sm border border-amber-400/25 bg-amber-400/6 p-3">
+                  <p className="micro mb-2 flex items-center gap-1.5 text-amber-300">
+                    <Scale className="h-3 w-3" aria-hidden />
+                    Contradicting evidence
+                  </p>
+                  <ul className="space-y-1.5">
+                    {investigation!.contradictingEvidence!.map((c, i) => (
+                      <motion.li
+                        key={c}
+                        initial={{ opacity: 0, x: -6 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: 0.12 + i * 0.06 }}
+                        className="text-[12px] leading-snug text-amber-100/80"
+                      >
+                        {c}
+                      </motion.li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Uncertainties — what better data would resolve */}
+              {(investigation?.uncertainties?.length ?? 0) > 0 && (
+                <div>
+                  <p className="micro mb-2 text-slate-500">Uncertainties — what better data would resolve</p>
+                  <ul className="space-y-1.5">
+                    {investigation!.uncertainties!.map((u, i) => (
+                      <motion.li
+                        key={u}
+                        initial={{ opacity: 0, x: -6 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: 0.16 + i * 0.06 }}
+                        className="flex items-start gap-2 text-[12px] leading-snug text-slate-500"
+                      >
+                        <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-slate-600" aria-hidden />
+                        {u}
+                      </motion.li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {/* Recommendation */}
               <div className="rounded-sm border border-line bg-surface-2/60 p-3.5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -179,6 +254,30 @@ export function AiInvestigator({
                   <div className="text-right">
                     <p className="micro text-slate-500">Confidence</p>
                     <p className="num mt-1 text-xl font-semibold text-slate-100">{txn.confidence ?? "—"}%</p>
+                    {investigation?.confidenceFactors && (
+                      <div className="mt-2 w-40 space-y-1.5">
+                        {(
+                          [
+                            ["Evidence agreement", investigation.confidenceFactors.evidenceAgreement],
+                            ["Data completeness", investigation.confidenceFactors.dataCompleteness],
+                            ["Historical precedent", investigation.confidenceFactors.historicalPrecedent],
+                          ] as const
+                        ).map(([label, value]) => (
+                          <div key={label} className="flex items-center gap-2">
+                            <span className="micro w-[92px] shrink-0 text-right text-slate-600">{label}</span>
+                            <div className="h-1 flex-1 overflow-hidden rounded-full bg-slate-500/10">
+                              <motion.div
+                                className="h-full rounded-full bg-intel/60"
+                                initial={{ width: 0 }}
+                                animate={{ width: `${Math.min(100, Math.max(0, value))}%` }}
+                                transition={{ duration: 0.6, delay: 0.2 }}
+                              />
+                            </div>
+                            <span className="num w-7 text-[10px] text-slate-500">{value}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <p className="mt-3 border-t border-line/70 pt-2.5 text-[12px] leading-relaxed text-slate-500">
@@ -225,9 +324,10 @@ export function AiInvestigator({
                           </div>
                         ))}
                       </div>
+                      <DecisionSensitivity score={txn.riskScore} signals={txn.signals} />
                       <p className="mt-3.5 border-t border-line/70 pt-3 text-[11px] leading-relaxed text-slate-500">
                         The composite score weighs each independent signal against the customer's
-                        90-day baseline. Correlated signals compound; a single signal alone would
+                        observed baseline. Correlated signals compound; a single signal alone would
                         not reach the action threshold. This panel shows structured evidence only —
                         the model's internal deliberation is never exposed.
                       </p>
