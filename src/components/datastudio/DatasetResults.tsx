@@ -42,6 +42,9 @@ import { RiskLevelBadge } from "@/components/risk/RiskBadge";
 import { StatusDot } from "@/components/shared/StatusDot";
 import { ThresholdLab } from "@/components/datastudio/ThresholdLab";
 import { FraudNetwork } from "@/components/datastudio/FraudNetwork";
+import { AttackSimulator } from "@/components/datastudio/AttackSimulator";
+import { DataQuality } from "@/components/datastudio/DataQuality";
+import { CalibrationTable } from "@/components/datastudio/CalibrationTable";
 import { useToast } from "@/hooks/use-toast";
 import { useAppStore } from "@/store/appStore";
 import { formatINR, formatNumber } from "@/lib/format";
@@ -352,6 +355,16 @@ export function DatasetResults({
         </div>
       </motion.div>
 
+      {/* data quality — the file behind the run */}
+      <motion.section
+        aria-label="Data quality"
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, delay: 0.04, ease: "easeOut" }}
+      >
+        <DataQuality rows={analysis.rows} skippedCount={analysis.skippedCount} />
+      </motion.section>
+
       {/* engine quality (labeled files only) */}
       {m.labelsPresent ? (
         <motion.section
@@ -425,6 +438,7 @@ export function DatasetResults({
             </div>
           </div>
           <ThresholdLab rows={analysis.rows} />
+          <CalibrationTable rows={analysis.rows} />
         </motion.section>
       ) : (
         <section aria-label="Unlabeled notice" className="flex items-start gap-2 rounded-sm border border-line bg-surface-1 px-3 py-2.5">
@@ -445,6 +459,16 @@ export function DatasetResults({
         transition={{ duration: 0.35, delay: 0.1, ease: "easeOut" }}
       >
         <FraudNetwork rows={analysis.rows} />
+      </motion.section>
+
+      {/* attack simulator — red team vs the rule engine */}
+      <motion.section
+        aria-label="Attack simulator"
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, delay: 0.12, ease: "easeOut" }}
+      >
+        <AttackSimulator analysis={analysis} />
       </motion.section>
 
       {/* volume analytics */}

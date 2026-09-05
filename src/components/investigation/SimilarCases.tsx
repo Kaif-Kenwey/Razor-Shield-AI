@@ -1,31 +1,27 @@
 "use client";
 
 /**
- * SimilarCases — precedent library panel for the investigation workspace.
- * Shows closed cases from the archive that share risk signals with the
- * case at hand, so the analyst decides with historical context
- * ("what happened last time this pattern appeared?").
+ * SimilarCases — precedent evidence panel for the investigation workspace.
+ *
+ * Matches are computed for real: a six-component feature vector (amount
+ * deviation from the customer median, cyclical hour-of-day, burst-window
+ * velocity, device age flag, city, payment rail) is compared against every
+ * OTHER-customer transaction loaded in the workspace — the demo ledger,
+ * live arrivals and dataset-routed rows alike. See lib/similarCases.ts for
+ * the exact math. Outcomes are shown only for analyst-adjudicated cases,
+ * which turns matched precedents into genuine evidence ("last time this
+ * pattern appeared, it ended in confirmed fraud").
  */
 
+import { useMemo } from "react";
 import { motion } from "framer-motion";
 import { History, Scale } from "lucide-react";
-import { similarCasesFor } from "@/data/mockData";
-import { formatINR } from "@/lib/format";
+import { useAppStore } from "@/store/appStore";
+import { similarTransactionsFor } from "@/lib/similarCases";
+import { formatINR, relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { RiskLevel, SignalType, Transaction } from "@/types";
-
-const SIGNAL_SHORT: Record<SignalType, string> = {
-  NEW_DEVICE: "New device",
-  UNUSUAL_AMOUNT: "Amount",
-  LOCATION_ANOMALY: "Location",
-  VELOCITY_SPIKE: "Velocity",
-  IMPOSSIBLE_TRAVEL: "Travel",
-  HIGH_VALUE: "High value",
-  MERCHANT_RISK: "Merchant",
-  TIME_ANOMALY: "Time",
-  METHOD_MISMATCH: "Method",
-  STRUCTURING: "Structuring",
-};
+import type { RiskLevel, Transaction } from "@/types";
+import type { PrecedentOutcome } from "@/lib/similarCases";
 
 const LEVEL_CHIP: Record<RiskLevel, string> = {
   LOW: "border-slate-500/30 bg-slate-500/10 text-slate-300",
@@ -34,100 +30,121 @@ const LEVEL_CHIP: Record<RiskLevel, string> = {
   CRITICAL: "border-risk-critical/40 bg-risk-critical/10 text-risk-critical",
 };
 
-const OUTCOME_TONE: Record<string, string> = {
-  FRAUD_CONFIRMED: "text-risk-critical",
-  CHARGEBACK_FILED: "text-risk-high",
-  CUSTOMER_VERIFIED: "text-risk-low",
-  LEGITIMATE: "text-risk-low",
+const OUTCOME_CHIP: Record<PrecedentOutcome, string> = {
+  FRAUD_CONFIRMED: "border-risk-critical/40 bg-risk-critical/10 text-risk-critical",
+  LEGITIMATE: "border-risk-low/40 bg-risk-low/10 text-risk-low",
+};
+
+const OUTCOME_LABEL: Record<PrecedentOutcome, string> = {
+  FRAUD_CONFIRMED: "Outcome: CONFIRMED FRAUD",
+  LEGITIMATE: "Outcome: LEGITIMATE",
+};
+
+const OUTCOME_HINT: Record<PrecedentOutcome, string> = {
+  FRAUD_CONFIRMED: "Analyst adjudicated this case with a BLOCK decision.",
+  LEGITIMATE: "Analyst adjudicated this case with an ALLOW decision.",
 };
 
 export function SimilarCases({ txn }: { txn: Transaction }) {
-  const cases = similarCasesFor(txn);
+  const universe = useAppStore((s) => s.transactions);
+  const decisions = useAppStore((s) => s.decisions);
+  const openInvestigation = useAppStore((s) => s.openInvestigation);
 
-  if (cases.length === 0) return null;
+  const { hits, comparable, total } = useMemo(
+    () => similarTransactionsFor(txn, universe, { decisions }),
+    [txn, universe, decisions],
+  );
+
+  if (hits.length === 0) return null;
 
   return (
-    <section className="panel overflow-hidden" aria-label="Similar past cases">
+    <section className="panel overflow-hidden" aria-label="Similar cases">
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <p className="micro-11 flex items-center gap-2 font-semibold text-slate-200">
           <History className="h-3.5 w-3.5 text-intel" aria-hidden />
-          Similar past cases
+          Similar cases
         </p>
-        <span className="num rounded-full border border-intel/30 bg-intel/10 px-2 py-0.5 text-[10.5px] text-intel">
-          {cases.length} matched
+        <span className="num flex items-center gap-1 rounded-full border border-intel/30 bg-intel/10 px-2 py-0.5 text-[10.5px] text-intel">
+          <Scale className="h-3 w-3 opacity-70" aria-hidden />
+          {hits.length} matched
         </span>
       </div>
 
       <ul className="divide-y divide-line/60">
-        {cases.map((c, i) => (
+        {hits.map((hit, i) => (
           <motion.li
-            key={c.id}
+            key={hit.txn.id}
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 + i * 0.08, duration: 0.3 }}
             className="group px-4 py-3 transition-colors hover:bg-surface-2/70"
           >
-            {/* id · closed · score · similarity */}
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="num truncate text-[12.5px] font-semibold text-slate-100">{c.id}</span>
-                <span className="micro shrink-0 text-slate-600">{c.closedLabel}</span>
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
+            {/* id · score level · similarity */}
+            <button
+              type="button"
+              onClick={() => openInvestigation(hit.txn.id)}
+              title={`Open ${hit.txn.id} in the investigation workspace`}
+              className="flex w-full items-center justify-between gap-2 rounded-sm text-left outline-none focus-visible:ring-1 focus-visible:ring-intel/60"
+            >
+              <span className="num truncate text-[12.5px] font-semibold text-slate-100 group-hover:text-white">
+                {hit.txn.id}
+              </span>
+              <span className="flex shrink-0 items-center gap-2">
                 <span
                   className={cn(
                     "num rounded-sm border px-1.5 py-0.5 text-[10.5px] font-bold",
-                    LEVEL_CHIP[c.level]
+                    LEVEL_CHIP[hit.txn.riskLevel],
                   )}
-                  title={`Closed at ${c.score}/100 · ${c.level}`}
+                  title={`Scored ${hit.txn.riskScore}/100 · ${hit.txn.riskLevel}`}
                 >
-                  {c.score}
+                  {hit.txn.riskScore}
                 </span>
                 <span
                   className="num flex items-center gap-1 text-[10.5px] font-medium text-intel"
-                  title={`${c.sharedSignals.length} of ${txn.signals.length} signals matched`}
+                  title="Weighted feature-vector similarity (see footnote)"
                 >
                   <Scale className="h-3 w-3 opacity-70" aria-hidden />
-                  {c.similarity}%
+                  {hit.similarity}%
                 </span>
-              </div>
-            </div>
-
-            {/* pattern chips — shared signals highlighted */}
-            <div className="mt-2 flex flex-wrap gap-1">
-              {c.signals.map((s) => {
-                const shared = c.sharedSignals.includes(s);
-                return (
-                  <span
-                    key={s}
-                    className={cn(
-                      "rounded-sm border px-1.5 py-0.5 text-[10px]",
-                      shared
-                        ? "border-intel/40 bg-intel/10 text-intel"
-                        : "border-line bg-surface-1 text-slate-600"
-                    )}
-                  >
-                    {SIGNAL_SHORT[s]}
-                  </span>
-                );
-              })}
-            </div>
-
-            {/* amount + outcome */}
-            <div className="mt-2 flex items-baseline justify-between gap-3">
-              <span className="num text-[11.5px] text-slate-500">{formatINR(c.amount)}</span>
-              <span className={cn("truncate text-[11px] font-medium", OUTCOME_TONE[c.outcome])}>
-                {c.action} · {c.outcomeLabel}
               </span>
+            </button>
+
+            {/* why — top contributing shared features */}
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">
+              {hit.reasons.join(" · ")}
+            </p>
+
+            {/* amount · context · outcome */}
+            <div className="mt-1.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+              <span className="num text-[11.5px] text-slate-500">
+                {formatINR(hit.txn.amount)} · {hit.txn.merchant} · {relativeTime(hit.txn.timestamp)}
+              </span>
+              {hit.outcome && (
+                <span
+                  className={cn(
+                    "rounded-sm border px-1.5 py-0.5 text-[10px] font-bold",
+                    OUTCOME_CHIP[hit.outcome],
+                  )}
+                  title={OUTCOME_HINT[hit.outcome]}
+                >
+                  {OUTCOME_LABEL[hit.outcome]}
+                </span>
+              )}
             </div>
           </motion.li>
         ))}
       </ul>
 
-      <div className="border-t border-line px-4 py-2.5">
+      <div className="space-y-1 border-t border-line px-4 py-2.5">
+        {comparable < 15 && (
+          <p className="text-[10.5px] leading-relaxed text-risk-medium/80">
+            limited precedent universe: {comparable} comparable transaction{comparable === 1 ? "" : "s"}
+          </p>
+        )}
         <p className="text-[10.5px] leading-relaxed text-slate-600">
-          Closed cases from the demo archive — pattern reference only, shown to
-          the analyst before the bounded action.
+          Feature-vector match over {comparable} of {total} loaded transactions — amount vs customer
+          median, hour-of-day, velocity, device, city, rail. Outcome chips only for
+          analyst-adjudicated cases.
         </p>
       </div>
     </section>

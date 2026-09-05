@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DatasetResults } from "@/components/datastudio/DatasetResults";
+import { AttackSimulator } from "@/components/datastudio/AttackSimulator";
 import { useToast } from "@/hooks/use-toast";
 import { useAppStore } from "@/store/appStore";
 import {
@@ -411,6 +412,9 @@ export function DataStudioView() {
                 </ul>
               )}
             </section>
+
+            {/* attack sim teaser — arms the empty state with the run it needs */}
+            <AttackSimulator analysis={null} />
           </motion.section>
         )}
 

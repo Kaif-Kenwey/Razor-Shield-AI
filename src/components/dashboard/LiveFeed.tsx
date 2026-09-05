@@ -7,14 +7,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronRight, FolderSearch, Pause, Play, Star } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, ChevronRight, FolderSearch, Pause, Play, Star, TriangleAlert } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { RiskLevelBadge, StatusBadge } from "@/components/risk/RiskBadge";
 import { InlineScore } from "@/components/risk/RiskScoreDial";
 import { EmptyState, FeedSkeleton } from "@/components/shared/States";
 import { isDialogOpen, isTypingTarget } from "@/components/layout/KeyboardShortcuts";
 import { useAppStore } from "@/store/appStore";
-import { formatINR, relativeTime } from "@/lib/format";
+import { useClusterStore, type ClusterEvent } from "@/hooks/useFraudClusters";
+import { formatINR, formatINRCompact, relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { RiskLevel, Transaction } from "@/types";
 
@@ -51,6 +52,100 @@ function matchesFilter(t: Transaction, f: FilterKey, watchlist: Record<string, t
 }
 
 const LEVEL_ORDER: Record<RiskLevel, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+
+/** A feed row is either a transaction or a staged fraud-cluster stream event. */
+type FeedRow = { kind: "txn"; txn: Transaction } | { kind: "cluster"; cluster: ClusterEvent };
+
+/**
+ * Cluster banner row — a typed stream event rendered between transactions.
+ * While the burst window is live it pulses (CRITICAL styling language);
+ * once the window closes it stays only if the analyst opened the linked
+ * case, downgraded to a non-pulsing row with an emerald link chip.
+ */
+function ClusterBannerRow({
+  cluster,
+  cursorRow,
+  onOpen,
+}: {
+  cluster: ClusterEvent;
+  cursorRow: boolean;
+  onOpen: () => void;
+}) {
+  const active = cluster.status === "active";
+  return (
+    <motion.tr
+      layout="position"
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.45, ease: "easeOut" }}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      tabIndex={0}
+      role="button"
+      aria-label={
+        active
+          ? `Fraud cluster detected: ${cluster.summary.txnCount} transactions, ${cluster.summary.deviceCount} devices, exposure ${cluster.summary.exposure}. Open highest-risk case.`
+          : `Resolved fraud cluster linked to case ${cluster.linkedCaseId}`
+      }
+      data-cursor={cursorRow ? "true" : undefined}
+      className={cn(
+        "group cursor-pointer border-b border-line/60 transition-colors outline-none",
+        "focus-visible:bg-surface-2",
+        cursorRow && "bg-surface-2 shadow-[inset_2px_0_0_0_rgba(167,139,250,0.65)]",
+        active
+          ? "bg-risk-high/[0.06] hover:bg-risk-high/[0.1]"
+          : "bg-surface-2/60 hover:bg-surface-2",
+      )}
+    >
+      <td colSpan={9} className="px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+          <span className="relative flex h-2 w-2 shrink-0">
+            {active && (
+              <span className="absolute h-full w-full rounded-full bg-risk-high opacity-60 live-ping" aria-hidden />
+            )}
+            <span className={cn("relative h-2 w-2 rounded-full", active ? "bg-risk-high" : "bg-risk-low/70")} />
+          </span>
+          <TriangleAlert
+            className={cn("h-3.5 w-3.5 shrink-0", active ? "text-risk-high" : "text-slate-500")}
+            aria-hidden
+          />
+          <span className={cn("micro-11 font-bold tracking-wide", active ? "text-risk-high" : "text-slate-400")}>
+            {active ? "FRAUD CLUSTER DETECTED" : "FRAUD CLUSTER"}
+          </span>
+          <span className="num text-[11.5px] text-slate-300">
+            {cluster.summary.txnCount} txns · {cluster.summary.deviceCount}{" "}
+            {cluster.summary.deviceCount === 1 ? "device" : "devices"} ·{" "}
+            {formatINRCompact(cluster.summary.exposure)} exposure
+          </span>
+          {active && (
+            <span className="rounded-sm border border-risk-high/35 bg-risk-high/10 px-1.5 py-0.5 micro-11 text-risk-high">
+              2 min window
+            </span>
+          )}
+          <span className="ml-auto flex items-center gap-1.5">
+            {!active && cluster.linkedCaseId ? (
+              <span className="flex items-center gap-1 rounded-sm border border-risk-low/35 bg-risk-low/10 px-1.5 py-0.5 micro-11 text-risk-low">
+                <CheckCircle2 className="h-3 w-3" aria-hidden />
+                linked to case {cluster.linkedCaseId}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 micro-11 text-slate-500 transition-colors group-hover:text-slate-300">
+                open highest-risk case
+                <ChevronRight className="h-3 w-3" aria-hidden />
+              </span>
+            )}
+          </span>
+        </div>
+      </td>
+    </motion.tr>
+  );
+}
 
 function SortButton({
   label,
@@ -92,7 +187,16 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
   const watchlist = useAppStore((s) => s.watchlist);
   const openInvestigation = useAppStore((s) => s.openInvestigation);
   const openDetail = useAppStore((s) => s.openTransactionDetail);
+  const clusterEvents = useClusterStore((s) => s.clusters);
   const onRowClick = clickMode === "detail" ? openDetail : openInvestigation;
+
+  /** Banner click — opens the linked highest-risk case and pins the link
+   * so the resolved banner keeps its emerald "linked to case" chip. */
+  const openClusterCase = (cluster: ClusterEvent) => {
+    const caseId = cluster.linkedCaseId ?? cluster.topTxnId;
+    useClusterStore.getState().linkCluster(cluster.id, caseId);
+    openInvestigation(caseId);
+  };
 
   const [filter, setFilter] = useState<FilterKey>("ALL");
   const [sortKey, setSortKey] = useState<SortKey>("time");
@@ -131,7 +235,36 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
     });
   }, [transactions, filter, sortKey, sortDir, tick, watchlist]);
 
-  const visible = compact ? rows.slice(0, 9) : rows;
+  /** Unified row model — transactions interleaved with cluster stream
+   * events. Each banner anchors at its first visible member so the burst
+   * group stays together; non-time sorts pin banners to the top. */
+  const unified = useMemo<FeedRow[]>(() => {
+    const txnRows: FeedRow[] = rows.map((txn) => ({ kind: "txn", txn }));
+    if (clusterEvents.length === 0) return txnRows;
+
+    const anchors = clusterEvents.map((cluster) => {
+      let idx = txnRows.findIndex((r) => r.kind === "txn" && cluster.memberIds.includes(r.txn.id));
+      if (idx === -1 && sortKey === "time") {
+        const detected = new Date(cluster.detectedAt).getTime();
+        idx = txnRows.findIndex((r) => r.kind === "txn" && new Date(r.txn.timestamp).getTime() < detected);
+        if (idx === -1) idx = txnRows.length;
+      } else if (idx === -1) {
+        idx = 0;
+      }
+      return { cluster, idx };
+    });
+
+    // insert bottom-up so earlier anchors stay valid; older banner first on ties
+    anchors.sort(
+      (a, b) => b.idx - a.idx || new Date(a.cluster.detectedAt).getTime() - new Date(b.cluster.detectedAt).getTime(),
+    );
+    const out = [...txnRows];
+    for (const { cluster, idx } of anchors) out.splice(idx, 0, { kind: "cluster", cluster });
+    return out;
+  }, [rows, clusterEvents, sortKey]);
+
+  const visible = compact ? unified.slice(0, 9) : unified;
+  const visibleTxnCount = visible.reduce((n, r) => (r.kind === "txn" ? n + 1 : n), 0);
 
   const counts = useMemo(() => {
     const c: Record<FilterKey, number> = { ALL: transactions.length, WATCHED: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INVESTIGATING: 0, BLOCKED: 0 };
@@ -154,7 +287,7 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
     }
   };
 
-  /* j / k / Enter — keyboard cursor over the feed */
+  /* j / k / Enter — keyboard cursor over the feed (banners included) */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -165,14 +298,19 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
         return;
       }
       if (e.key !== "j" && e.key !== "k" && e.key !== "Enter") return;
-      if (loading || rows.length === 0) return;
+      if (loading || visible.length === 0) return;
 
       if (e.key === "Enter") {
         // don't hijack Enter on focused buttons / links
         if (e.target instanceof HTMLElement && e.target.closest("button, a, [role='button']")) return;
         if (cursor === null) return;
-        const t = visible[cursor];
-        if (t && t.status !== "EVALUATING") onRowClick(t.id);
+        const row = visible[cursor];
+        if (!row) return;
+        if (row.kind === "cluster") {
+          openClusterCase(row.cluster);
+          return;
+        }
+        if (row.txn.status !== "EVALUATING") onRowClick(row.txn.id);
         return;
       }
 
@@ -287,7 +425,18 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
               </thead>
               <tbody>
                 <AnimatePresence initial={false}>
-                  {visible.map((t, idx) => {
+                  {visible.map((row, idx) => {
+                    if (row.kind === "cluster") {
+                      return (
+                        <ClusterBannerRow
+                          key={`cluster-${row.cluster.id}`}
+                          cluster={row.cluster}
+                          cursorRow={cursor === idx}
+                          onOpen={() => openClusterCase(row.cluster)}
+                        />
+                      );
+                    }
+                    const t = row.txn;
                     const isEvaluating = t.status === "EVALUATING";
                     const hot = t.riskLevel === "CRITICAL";
                     const cursorRow = cursor === idx;
@@ -399,7 +548,7 @@ export function LiveFeed({ compact = false, clickMode = "investigation" }: { com
               </span>
             )}
           </p>
-          {!compact && <p className="num text-[11px] text-slate-600">showing {visible.length} / {rows.length}</p>}
+          {!compact && <p className="num text-[11px] text-slate-600">showing {visibleTxnCount} / {rows.length}</p>}
         </div>
       )}
     </section>

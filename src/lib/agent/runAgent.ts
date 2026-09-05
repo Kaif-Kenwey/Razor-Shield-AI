@@ -15,7 +15,8 @@
 
 import type { Investigation, Transaction } from "@/types";
 import { useAppStore } from "@/store/appStore";
-import { buildInvestigation, customerFor, similarCasesFor } from "@/data/mockData";
+import { buildInvestigation, customerFor } from "@/data/mockData";
+import { similarTransactionsFor } from "@/lib/similarCases";
 import type { AgentCaseContext } from "./investigator";
 
 /* ------------------------------------------------------------------ */
@@ -80,6 +81,10 @@ export function heuristicInvestigation(txn: Transaction): Investigation {
 
 export function buildAgentContext(txn: Transaction): AgentCaseContext {
   const c = customerFor(txn);
+  const store = useAppStore.getState();
+  /* Real precedent recall: feature-vector similarity over the loaded
+   * universe, with analyst-adjudicated outcomes where they exist. */
+  const { hits } = similarTransactionsFor(txn, store.transactions, { decisions: store.decisions });
   return {
     transaction: {
       id: txn.id,
@@ -110,10 +115,14 @@ export function buildAgentContext(txn: Transaction): AgentCaseContext {
       usualLocation: c.usualLocation,
       usualDevice: c.usualDevice,
     },
-    similarCases: similarCasesFor(txn).map((s) => ({
-      id: s.id,
-      similarity: Math.min(1, s.similarity / 100),
-      outcome: s.outcomeLabel ?? s.outcome,
+    similarCases: hits.map((h) => ({
+      id: h.txn.id,
+      similarity: h.similarity / 100,
+      outcome: h.outcome
+        ? h.outcome === "FRAUD_CONFIRMED"
+          ? "confirmed fraud (analyst-blocked)"
+          : "legitimate (analyst-cleared)"
+        : `unadjudicated · engine score ${h.txn.riskScore}/100`,
     })),
   };
 }

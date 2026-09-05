@@ -49,7 +49,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-intel shadow-[0_0_8px_rgba(167,139,250,0.9)]" />
         </div>
         <div>
-          <p className="text-[13.5px] font-semibold tracking-[0.08em] text-slate-100">RAZORSHIELD</p>
+          <p className="font-display text-[13.5px] font-semibold tracking-[0.08em] text-slate-100">RAZORSHIELD</p>
           <p className="micro text-slate-500 mt-0.5">AI Risk Engine</p>
         </div>
       </div>
