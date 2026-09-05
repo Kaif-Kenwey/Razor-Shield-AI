@@ -102,7 +102,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         <div className="space-y-2 text-[11px] tracking-tight">
           <div className="flex items-center justify-between">
             <span className="text-slate-500">Model</span>
-            <span className="num text-slate-300">v1.0</span>
+            <span className="num text-slate-300">rse-1.2</span>
           </div>
           <div className="flex items-center justify-between">
             <span className="text-slate-500">Engine</span>

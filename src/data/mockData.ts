@@ -899,7 +899,7 @@ export const VELOCITY_TREND = [
 /* ------------------------------------------------------------------ */
 
 export const MODEL_PERFORMANCE: ModelPerformance = {
-  modelVersion: "v1.0",
+  modelVersion: "rse-1.2",
   trainedAt: "2026-01-28",
   trainingDataset: "rz-fraud-historic-2025Q4 · 18.2M labelled transactions",
   evaluationDataset: "rz-fraud-holdout-2026Jan · 24,891 transactions (demo)",
@@ -958,7 +958,7 @@ export const NOTIFICATIONS: AppNotification[] = [
   },
   {
     id: "n4",
-    title: "Model v1.0 deployed",
+    title: "Model rse-1.2 deployed",
     body: "Risk engine reloaded with threshold 85. No downtime.",
     time: minutesAgo(121),
     tone: "intel",

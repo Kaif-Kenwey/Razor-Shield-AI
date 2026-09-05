@@ -126,7 +126,7 @@ function DetailSections({ txn }: { txn: Transaction }) {
         <AccordionTrigger className="micro-11 py-3.5 text-slate-300 hover:no-underline">Model decision</AccordionTrigger>
         <AccordionContent className="pb-4">
           <dl>
-            <Row label="Model" value="RazorShield Risk Model v1.0" />
+            <Row label="Model" value="RazorShield Risk Model rse-1.2" />
             <Row label="Composite score" value={`${txn.riskScore}/100`} />
             <Row label="Risk level" value={txn.riskLevel} />
             <Row label="Action threshold" value="≥ 85 → investigation" />

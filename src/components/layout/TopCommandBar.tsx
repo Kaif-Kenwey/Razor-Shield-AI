@@ -120,7 +120,7 @@ export function TopCommandBar({ onOpenMobileNav }: { onOpenMobileNav: () => void
                 </span>
               </div>
             </TooltipTrigger>
-            <TooltipContent side="bottom">Risk engine v1.0 · p99 latency 18ms</TooltipContent>
+            <TooltipContent side="bottom">Risk engine rse-1.2 · p99 latency 18ms</TooltipContent>
           </Tooltip>
 
           {/* Demo mode */}
