@@ -78,7 +78,7 @@ export function SystemView() {
   const envRows: { label: string; value: string; tone?: "good" | "bad" }[] = [
     { label: "Deployment", value: "Buildathon demo sandbox" },
     { label: "Region", value: "ap-south-1 (Mumbai)" },
-    { label: "Data source", value: "Mock dataset v1.2 — deterministic" },
+    { label: "Data source", value: "Deterministic synthetic mock data" },
     { label: "Live streaming", value: demoMode ? (streamPaused ? "Enabled · arrivals paused" : "Enabled (scripted arrivals)") : "Disabled" },
     { label: "Critical alerts", value: soundEnabled ? "Chime on critical arrivals" : "Muted (toast only)" },
     {
