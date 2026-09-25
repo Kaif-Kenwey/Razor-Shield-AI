@@ -2,7 +2,6 @@
 
 **AI-Powered Payment Risk Detection & Investigation Agent**
 
-*Razorpay AI Buildathon 2026 — "AI Risk Manager" track*
 
 ![Next.js](https://img.shields.io/badge/Next.js-16-black) ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue) ![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -162,4 +161,4 @@ prisma/                     # Schema (SQLite): Dataset + DatasetRow
 
 ---
 
-Built by **Mohammad Kaif** for the Razorpay AI Buildathon 2026, "AI Risk Manager" track — where the AI does the legwork, and the human stays in command.
+Built by **Mohammad Kaif** , "AI Risk Manager" track — where the AI does the legwork, and the human stays in command.
