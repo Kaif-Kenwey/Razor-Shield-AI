@@ -9,7 +9,7 @@
  * and the recent event log from NOTIFICATIONS.
  */
 
-import { Fragment } from "react";
+import { Fragment, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
   Archive,
@@ -70,6 +70,14 @@ export function SystemView() {
   const demoMode = useAppStore((s) => s.demoMode);
   const streamPaused = useAppStore((s) => s.streamPaused);
   const soundEnabled = useAppStore((s) => s.soundEnabled);
+  const llmStatus = useAppStore((s) => s.llmStatus);
+  const refreshLlmStatus = useAppStore((s) => s.refreshLlmStatus);
+  const setAiConfigOpen = useAppStore((s) => s.setAiConfigOpen);
+
+  /* Keep the AI investigator row honest — resolve on mount. */
+  useEffect(() => {
+    void refreshLlmStatus();
+  }, [refreshLlmStatus]);
 
   const offline = connection === "offline";
   const servicesById = new Map(SYSTEM_SERVICES.map((svc) => [svc.id, svc]));
@@ -79,6 +87,13 @@ export function SystemView() {
     { label: "Deployment", value: "Local demo sandbox" },
     { label: "Region", value: "ap-south-1 (Mumbai)" },
     { label: "Data source", value: "Deterministic synthetic mock data" },
+    {
+      label: "AI investigator",
+      value: llmStatus?.configured
+        ? `LLM live · ${llmStatus.model || llmStatus.baseUrl}${llmStatus.source === "env" ? " (.env)" : ""}`
+        : "Heuristic engine — no LLM configured",
+      tone: llmStatus?.configured ? "good" : undefined,
+    },
     { label: "Live streaming", value: demoMode ? (streamPaused ? "Enabled · arrivals paused" : "Enabled (scripted arrivals)") : "Disabled" },
     { label: "Critical alerts", value: soundEnabled ? "Chime on critical arrivals" : "Muted (toast only)" },
     {
@@ -190,7 +205,13 @@ export function SystemView() {
                 />
                 <div className="min-w-0 flex-1">
                   <p className="text-[13px] font-medium text-slate-200">{svc.name}</p>
-                  <p className="text-[11px] text-slate-500">{svc.detail}</p>
+                  <p className="text-[11px] text-slate-500">
+                    {svc.id === "ai" && llmStatus
+                      ? llmStatus.configured
+                        ? `LLM live · ${llmStatus.model || "endpoint default"}`
+                        : "Heuristic mode — connect an LLM from the top bar"
+                      : svc.detail}
+                  </p>
                 </div>
                 <div className="hidden text-right sm:block">
                   <p className="micro text-slate-600">Latency</p>
@@ -221,8 +242,17 @@ export function SystemView() {
         className="panel mt-5 overflow-hidden"
         aria-label="Environment"
       >
-        <div className="border-b border-line px-4 py-3">
+        <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
           <h2 className="micro-11 font-semibold text-slate-200">Environment</h2>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAiConfigOpen(true)}
+            className="h-7 gap-1.5 border-line bg-surface-1 px-2.5 text-[11px] text-slate-300 hover:bg-surface-2"
+          >
+            <Sparkles className="h-3 w-3" aria-hidden />
+            AI settings
+          </Button>
         </div>
         <dl className="grid gap-x-8 px-4 py-2 sm:grid-cols-2">
           {envRows.map((row) => (

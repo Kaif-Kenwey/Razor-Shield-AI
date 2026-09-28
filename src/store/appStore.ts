@@ -23,6 +23,21 @@ export interface CaseNote {
   at: string;
 }
 
+/**
+ * Live status of the AI investigator's LLM endpoint, as reported by
+ * GET /api/llm-config. source "runtime" = saved from the in-app AI
+ * panel, "env" = .env-managed deployment, "none" = deterministic
+ * heuristics only. The API key is always masked server-side.
+ */
+export interface LlmStatus {
+  configured: boolean;
+  source: "runtime" | "env" | "none";
+  baseUrl: string;
+  model: string;
+  keyMasked: string;
+  hasRuntimeConfig: boolean;
+}
+
 interface AppState {
   view: ViewKey;
   /** Transaction under investigation (investigation view). */
@@ -64,6 +79,10 @@ interface AppState {
   queueBreachFilter: boolean;
   /** Notebook entry to spotlight after a palette jump (scroll + flash). Ephemeral. */
   highlightNoteId: string | null;
+  /** AI investigator endpoint status (null until the first fetch resolves). Ephemeral. */
+  llmStatus: LlmStatus | null;
+  /** In-app AI configuration panel (top-bar entry point). Ephemeral. */
+  aiConfigOpen: boolean;
 
   navigate: (view: ViewKey) => void;
   openInvestigation: (txnId: string) => void;
@@ -90,6 +109,9 @@ interface AppState {
   setQueueAssignee: (analystId: string | null) => void;
   setQueueBreachFilter: (on: boolean) => void;
   setHighlightNoteId: (noteId: string | null) => void;
+  /** Re-fetches the investigator's LLM status from /api/llm-config. */
+  refreshLlmStatus: () => Promise<void>;
+  setAiConfigOpen: (open: boolean) => void;
   markDigestToastShown: () => void;
   setSoundEnabled: (on: boolean) => void;
   markNotificationsRead: () => void;
@@ -139,6 +161,8 @@ export const useAppStore = create<AppState>()(
   queueAssignee: null,
   queueBreachFilter: false,
   highlightNoteId: null,
+  llmStatus: null,
+  aiConfigOpen: false,
 
   navigate: (view) => set({ view, focusTxnId: null, detailTxnId: null }),
 
@@ -161,6 +185,19 @@ export const useAppStore = create<AppState>()(
   setDemoMode: (demoMode) => set({ demoMode }),
   setStreamPaused: (streamPaused) => set({ streamPaused }),
   setConnection: (connection) => set({ connection }),
+
+  refreshLlmStatus: async () => {
+    try {
+      const res = await fetch("/api/llm-config", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as LlmStatus;
+      set({ llmStatus: data });
+    } catch {
+      /* Offline or endpoint hiccup — keep the last known status. */
+    }
+  },
+
+  setAiConfigOpen: (aiConfigOpen) => set({ aiConfigOpen }),
 
   toggleWatch: (txnId) =>
     set((s) => {

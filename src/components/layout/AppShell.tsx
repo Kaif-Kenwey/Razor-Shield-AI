@@ -7,6 +7,7 @@ import { Sidebar, SidebarContent } from "@/components/layout/Sidebar";
 import { TopCommandBar } from "@/components/layout/TopCommandBar";
 import { KeyboardShortcuts } from "@/components/layout/KeyboardShortcuts";
 import { DigestModal } from "@/components/investigation/DigestModal";
+import { AiConfigDialog } from "@/components/settings/AiConfigDialog";
 import { useDigestBriefing } from "@/hooks/useDigestBriefing";
 import { StatusDot } from "@/components/shared/StatusDot";
 import { useAppStore } from "@/store/appStore";
@@ -27,7 +28,7 @@ function Footer() {
           <kbd className="inline-flex h-4.5 items-center rounded border border-line bg-surface-2 px-1.5 num text-[9.5px] text-slate-400" title="Press ? to view all keyboard shortcuts">?</kbd>
           <span className="text-slate-700">·</span>
           <StatusDot tone="violet" pulse />
-          <span>Demo environment · synthetic data only · v1.4.1</span>
+          <span>Demo environment · synthetic data only · v1.5.0</span>
         </p>
       </div>
     </footer>
@@ -44,6 +45,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="flex min-h-screen flex-col bg-surface-0">
       <KeyboardShortcuts />
       <DigestModal />
+      <AiConfigDialog />
       <div className="flex flex-1">
         <Sidebar />
 

@@ -104,7 +104,7 @@ Three tools live under the scored results, because a score without instruments i
 
 **Dataset Studio** — a real server path end to end: `src/lib/csv.ts` (parse + map, client) → `POST /api/datasets/analyze` → `src/lib/riskEngine.ts` (scoring + metrics, server) → Prisma/SQLite persistence → typed results back to the dashboard.
 
-**Investigation** — `POST /api/investigate` hands rule-engine evidence to the configured LLM (`src/lib/agent/`, provider-agnostic via `LLM_BASE_URL`/`LLM_API_KEY`) and returns a validated structured verdict; without credentials it returns the heuristic verdict. The engine, graph module, similarity and simulator are all pure TypeScript with no I/O — the same code runs in a worker, a cron job, or another runtime unchanged.
+**Investigation** — `POST /api/investigate` hands rule-engine evidence to the configured LLM (`src/lib/agent/`, provider-agnostic via the in-app AI panel or `LLM_BASE_URL`/`LLM_API_KEY`) and returns a validated structured verdict; without credentials it returns the heuristic verdict. The engine, graph module, similarity and simulator are all pure TypeScript with no I/O — the same code runs in a worker, a cron job, or another runtime unchanged.
 
 ## Getting started
 
@@ -117,6 +117,8 @@ bun run dev         # http://localhost:3000
 ```
 
 Environment: copy `.env.example` to `.env`. `DATABASE_URL` works with zero configuration. The LLM investigator is **optional** — set `LLM_BASE_URL`, `LLM_API_KEY` (and optionally `LLM_MODEL`) to any OpenAI-compatible endpoint (OpenAI, Groq, Together, a private gateway, or local Ollama/vLLM) and the investigator goes live; leave them empty and the deterministic heuristic investigator answers, clearly labeled.
+
+No file editing needed either way: click the **AI** button in the top bar, pick a preset (OpenAI, Groq, local Ollama), paste a base URL and key, hit **Test connection**, then **Save & activate**. The key is probed live before saving, stored server-side in `db/llm-config.json` (gitignored), never returned to the browser, and the in-app config overrides `.env` — disconnect to fall back.
 
 ## Project structure
 

@@ -2,9 +2,12 @@
  * RazorShield AI — provider-agnostic LLM client (server-side only).
  *
  * Talks to ANY OpenAI-compatible chat-completions endpoint (OpenAI, Groq,
- * Together, Ollama, vLLM, private gateways...) configured purely through
- * environment variables, so the investigator can run against whatever
- * provider the deployment trusts:
+ * Together, Ollama, vLLM, private gateways...). The endpoint can come from
+ * two places, in priority order:
+ *
+ *   1. Runtime config saved from the in-app AI panel (db/llm-config.json,
+ *      gitignored, local to this machine) — see llmConfigStore.ts
+ *   2. Environment variables, so deployments can configure via infra:
  *
  *   LLM_BASE_URL      e.g. https://api.openai.com/v1
  *   LLM_API_KEY       bearer credential for that endpoint
@@ -12,10 +15,13 @@
  *   LLM_EXTRA_HEADERS optional JSON object of extra headers some corporate
  *                     gateways require, e.g. {"X-Token":"..."}
  *
- * Nothing here is provider-locked: no SDK dependency, one fetch call.
- * This module is imported only from API routes — never ship the key to
- * the browser.
+ * When neither source is configured the deterministic heuristic
+ * investigator handles the case and the UI says so. Nothing here is
+ * provider-locked: no SDK dependency, one fetch call. This module is
+ * imported only from API routes — never ship the key to the browser.
  */
+
+import { readRuntimeLlmConfig } from "./llmConfigStore";
 
 export interface LlmConfig {
   baseUrl: string;
@@ -30,6 +36,11 @@ export interface ChatMessage {
 }
 
 export function resolveLlmConfig(): LlmConfig | null {
+  /* 1. Runtime config saved from the in-app AI panel wins. */
+  const runtime = readRuntimeLlmConfig();
+  if (runtime) return runtime;
+
+  /* 2. Environment fallback (infra-managed deployments). */
   const baseUrl = process.env.LLM_BASE_URL?.trim();
   const apiKey = process.env.LLM_API_KEY?.trim();
   if (!baseUrl || !apiKey) return null;
@@ -81,7 +92,7 @@ export async function chatComplete(
   opts?: { temperature?: number; maxTokens?: number; timeoutMs?: number },
 ): Promise<{ content: string; model: string }> {
   const cfg = resolveLlmConfig();
-  if (!cfg) throw new LlmError("LLM is not configured (LLM_BASE_URL / LLM_API_KEY missing)");
+  if (!cfg) throw new LlmError("LLM is not configured (set it in the AI panel or via LLM_BASE_URL / LLM_API_KEY)");
 
   const body: Record<string, unknown> = {
     messages,

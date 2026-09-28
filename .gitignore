@@ -47,4 +47,6 @@ local-*
 upload/
 db/*.db
 db/*.db-journal
+# runtime LLM config saved from the in-app AI panel (contains the key)
+db/llm-config.json
 

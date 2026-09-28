@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Bell, Check, Menu, Radio, Search, ShieldCheck, UserCog, Volume2, VolumeX } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Bell, Check, Menu, Radio, Search, ShieldCheck, Sparkles, UserCog, Volume2, VolumeX } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -48,11 +48,19 @@ export function TopCommandBar({ onOpenMobileNav }: { onOpenMobileNav: () => void
   const openInvestigation = useAppStore((s) => s.openInvestigation);
   const signedInId = useAppStore((s) => s.signedInAnalystId);
   const setSignedInAnalyst = useAppStore((s) => s.setSignedInAnalyst);
+  const llmStatus = useAppStore((s) => s.llmStatus);
+  const refreshLlmStatus = useAppStore((s) => s.refreshLlmStatus);
+  const setAiConfigOpen = useAppStore((s) => s.setAiConfigOpen);
   const signedIn = ANALYSTS.find((a) => a.id === signedInId) ?? ANALYSTS[0];
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const { toast } = useToast();
+
+  /* Investigator mode pill — resolve once on mount (and after the AI panel saves). */
+  useEffect(() => {
+    void refreshLlmStatus();
+  }, [refreshLlmStatus, llmStatus?.source, llmStatus?.model]);
 
   const dimmed = view === "investigation" || view === "transaction-detail";
   const notifications = useMemo(() => NOTIFICATIONS, []);
@@ -121,6 +129,36 @@ export function TopCommandBar({ onOpenMobileNav }: { onOpenMobileNav: () => void
               </div>
             </TooltipTrigger>
             <TooltipContent side="bottom">Risk engine rse-1.2 · p99 latency 18ms</TooltipContent>
+          </Tooltip>
+
+          {/* AI investigator mode — live LLM or deterministic heuristics */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={() => setAiConfigOpen(true)}
+                className={cn(
+                  "flex h-8 shrink-0 items-center gap-2 rounded-sm border px-2.5 transition-colors",
+                  llmStatus?.configured
+                    ? "border-intel/45 bg-intel/10 text-intel hover:bg-intel/15"
+                    : "border-line bg-surface-1 text-slate-400 hover:border-line-strong hover:text-slate-200"
+                )}
+                aria-label={
+                  llmStatus?.configured
+                    ? `AI investigator live on ${llmStatus.model || llmStatus.baseUrl} — open AI settings`
+                    : "AI investigator running on deterministic heuristics — connect an LLM"
+                }
+              >
+                <Sparkles className="h-3.5 w-3.5" aria-hidden />
+                <span className="micro hidden whitespace-nowrap sm:inline">
+                  {llmStatus?.configured ? `AI: ${llmStatus.model || "live"}` : "AI: heuristics"}
+                </span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {llmStatus?.configured
+                ? `Investigator is live (${llmStatus.source === "env" ? ".env" : "in-app config"}) — click to manage`
+                : "No LLM connected — heuristics answer every case. Click to connect one."}
+            </TooltipContent>
           </Tooltip>
 
           {/* Demo mode */}
