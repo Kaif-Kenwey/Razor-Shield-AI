@@ -76,7 +76,7 @@ export function SystemView() {
   const operationalCount = SYSTEM_SERVICES.filter((s) => s.status === "operational").length;
 
   const envRows: { label: string; value: string; tone?: "good" | "bad" }[] = [
-    { label: "Deployment", value: "Buildathon demo sandbox" },
+    { label: "Deployment", value: "Local demo sandbox" },
     { label: "Region", value: "ap-south-1 (Mumbai)" },
     { label: "Data source", value: "Deterministic synthetic mock data" },
     { label: "Live streaming", value: demoMode ? (streamPaused ? "Enabled · arrivals paused" : "Enabled (scripted arrivals)") : "Disabled" },

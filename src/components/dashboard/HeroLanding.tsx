@@ -47,7 +47,7 @@ export function HeroLanding() {
           <ShieldCheck className="h-4 w-4 text-intel" aria-hidden />
           <span className="micro-11 text-slate-400">RazorShield AI</span>
           <span className="h-3 w-px bg-line-strong" aria-hidden />
-          <span className="micro-11 text-slate-600">Razorpay AI Buildathon 2026</span>
+          <span className="micro-11 text-slate-600">Demo environment · synthetic payment feed</span>
         </motion.div>
 
         <motion.h1

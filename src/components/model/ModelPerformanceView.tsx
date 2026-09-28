@@ -6,7 +6,7 @@
  * Every value on this page is rendered from the MODEL_PERFORMANCE snapshot
  * in the mock data layer — nothing is hardcoded. Because that snapshot is
  * demo data, a prominent disclaimer banner marks the metrics as mock
- * evaluation values for the Buildathon demo (not live production metrics).
+ * evaluation values for the built-in demo (not live production metrics).
  */
 
 import { motion } from "framer-motion";
@@ -109,7 +109,7 @@ export function ModelPerformanceView() {
         >
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-risk-medium" aria-hidden />
           <p className="text-[12px] text-risk-medium/90">
-            Demo snapshot — these are mock evaluation values for the Buildathon demo, not live
+            Demo snapshot — these are mock evaluation values for demonstration, not live
             production metrics. Replace via{" "}
             <span className="font-mono text-[11px] tracking-tight">GET /model/performance</span>.
           </p>

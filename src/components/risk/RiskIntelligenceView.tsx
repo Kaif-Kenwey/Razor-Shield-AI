@@ -473,8 +473,7 @@ export function RiskIntelligenceView() {
       </div>
 
       <p className="mt-5 text-[11px] text-slate-600">
-        Demo dataset for Buildathon presentation — swap in backend metrics via services/api.ts
-        without UI changes.
+        Demo dataset — swap in backend metrics via services/api.ts without UI changes.
       </p>
     </div>
   );

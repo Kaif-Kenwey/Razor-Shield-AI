@@ -181,7 +181,7 @@ export function PrintDigestBrief({ digest }: { digest: DigestSnapshot }) {
       </table>
 
       <footer style={{ marginTop: 16, borderTop: "1px solid #e2e8f0", paddingTop: 6, fontSize: 8.5, color: "#94a3b8", lineHeight: 1.5 }}>
-        RazorShield AI · Razorpay AI Buildathon 2026 demo environment. Every figure in this brief is derived live from the
+        RazorShield AI · demo environment. Every figure in this brief is derived live from the
         on-screen case window; workload trend is a synthetic demo series. Handoff is advisory — bounded actions stay with the
         signed-in analyst ({ANALYSTS.find((a) => a.id === digest.signedInId)?.name ?? "—"}) and are recorded in the audit trail.
       </footer>

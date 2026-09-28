@@ -5,7 +5,7 @@
  * exactly like the future backend responses so `services/api.ts` can swap
  * mocks for live endpoints without touching a single component.
  *
- * All values are DEMO DATA for the Razorpay AI Buildathon 2026 demo.
+ * All values are DEMO DATA for the built-in demo.
  * No real Razorpay data is used or implied.
  */
 
@@ -997,7 +997,7 @@ export interface DemoArrival {
 /**
  * Deterministic 8-step script. Every cycle produces:
  * routine → routine → ESCALATING CRITICAL → routine → HIGH → routine → CRITICAL → routine
- * so the Buildathon demo always shows at least two investigation-worthy
+ * so the demo always shows at least two investigation-worthy
  * arrivals per cycle, in a predictable order.
  */
 export const DEMO_ARRIVALS_SCRIPT: DemoArrival[] = [
