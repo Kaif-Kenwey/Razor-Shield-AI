@@ -161,4 +161,4 @@ prisma/                     # Schema (SQLite): Dataset + DatasetRow
 
 ---
 
-Built by **Mohammad Kaif** , "AI Risk Manager" track — where the AI does the legwork, and the human stays in command.
+Built by **Mohammad Kaif** — where the AI does the legwork, and the human stays in command.
