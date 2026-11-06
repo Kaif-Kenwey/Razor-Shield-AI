@@ -35,6 +35,7 @@ function statusFor() {
     model: active?.model ?? "",
     keyMasked: active ? maskKey(active.apiKey) : "",
     hasRuntimeConfig: runtime !== null,
+    provider: runtime?.provider ?? (active ? "env" : null),
   };
 }
 
@@ -56,12 +57,22 @@ const configSchema = z.object({
         return false;
       }
     }, "Enter a valid http(s) endpoint URL — e.g. https://api.groq.com/openai/v1"),
-  apiKey: z.string().trim().min(8, "API key looks too short").max(400, "API key is too long"),
+  apiKey: z
+    .string()
+    .trim()
+    .max(400, "API key is too long")
+    /* Ollama (local) is keyless: a placeholder is accepted so the same
+     * schema drives every provider. Non-local providers still require a
+     * real key at test time — the probe validates it against the endpoint. */
+    .refine((k) => k.length >= 8 || k === "ollama-local", "API key looks too short")
+    .default(""),
   model: z.string().trim().max(120, "Model id is too long").optional().default(""),
   extraHeaders: z
     .record(z.string(), z.string())
     .optional()
     .default({}),
+  provider: z.string().trim().max(40).optional(),
+  routing: z.string().trim().max(60).optional(),
 });
 
 export async function POST(request: Request) {
@@ -85,6 +96,8 @@ export async function POST(request: Request) {
     apiKey: parsed.data.apiKey,
     model: parsed.data.model,
     extraHeaders: parsed.data.extraHeaders,
+    provider: parsed.data.provider,
+    routing: parsed.data.routing,
   });
 
   return NextResponse.json({ ok: true, ...statusFor() });

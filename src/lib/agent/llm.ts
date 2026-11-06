@@ -28,6 +28,12 @@ export interface LlmConfig {
   apiKey: string;
   model: string;
   extraHeaders: Record<string, string>;
+  /** Provider registry id when configured from the AI panel ("openrouter",
+   *  "gemini", "groq", "ollama"), "custom" for manual endpoints, absent
+   *  for env-managed deployments. Metadata only — drives UI labels. */
+  provider?: string;
+  /** Which optional model routing was chosen, e.g. "openrouter/auto-free". */
+  routing?: string;
 }
 
 export interface ChatMessage {
@@ -69,12 +75,74 @@ export function resolveLlmConfig(): LlmConfig | null {
     apiKey,
     model: process.env.LLM_MODEL?.trim() ?? "",
     extraHeaders,
+    provider: "env" as const,
   };
 }
 
 export function llmConfigured(): boolean {
   return resolveLlmConfig() !== null;
 }
+
+/* ------------------------------------------------------------------ */
+/* Automatic free-model routing (OpenRouter)                           */
+/* ------------------------------------------------------------------ */
+
+/** The well-known automatic-free routing id (documented in the AI panel). */
+export const AUTO_FREE_ROUTING = "openrouter/free";
+
+interface FreeModelCache {
+  model: string | null;
+  fetchedAt: number;
+}
+
+let freeModelCache: FreeModelCache | null = null;
+const FREE_MODEL_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Resolves the automatic-free routing id to a CONCRETE free model by
+ * reading OpenRouter's live catalogue and picking the first model whose
+ * own pricing metadata is genuinely $0 (prompt + completion). Cached for
+ * 10 minutes so investigations don't hammer the catalogue. Returns null
+ * when no free model is currently listed — the caller then fails loudly
+ * rather than silently spending money.
+ */
+async function resolveAutoFreeModel(cfg: LlmConfig): Promise<string | null> {
+  if (freeModelCache && Date.now() - freeModelCache.fetchedAt < FREE_MODEL_TTL_MS) {
+    return freeModelCache.model;
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    const res = await fetch("https://openrouter.ai/api/v1/models", {
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, ...cfg.extraHeaders },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    clearTimeout(timer);
+    if (!res.ok) throw new LlmError(`OpenRouter catalogue responded ${res.status}`, res.status);
+    const data = (await res.json()) as { data?: { id?: unknown; pricing?: { prompt?: unknown; completion?: unknown } }[] };
+    const models = data?.data ?? [];
+    const free = models.find((m) => {
+      const prompt = Number.parseFloat(String(m.pricing?.prompt ?? "1"));
+      const completion = Number.parseFloat(String(m.pricing?.completion ?? "1"));
+      return typeof m.id === "string" && prompt === 0 && completion === 0;
+    });
+    const model = typeof free?.id === "string" ? free.id : null;
+    freeModelCache = { model, fetchedAt: Date.now() };
+    return model;
+  } catch {
+    /* Catalogue unreachable — do not cache the failure, retry next call. */
+    return null;
+  }
+}
+
+/** True when the config asks for automatic free-model routing. */
+function wantsAutoFree(cfg: LlmConfig): boolean {
+  return cfg.routing === AUTO_FREE_ROUTING || cfg.model === AUTO_FREE_ROUTING;
+}
+
+/** Probe-side alias — same resolution, exported for the test route. */
+export const resolveAutoFreeModelForProbe = resolveAutoFreeModel;
 
 export class LlmError extends Error {
   constructor(
@@ -94,12 +162,23 @@ export async function chatComplete(
   const cfg = resolveLlmConfig();
   if (!cfg) throw new LlmError("LLM is not configured (set it in the AI panel or via LLM_BASE_URL / LLM_API_KEY)");
 
+  /* Automatic free-model routing: resolve the routing id to a concrete
+   * zero-cost model from the live catalogue before calling the endpoint. */
+  let effectiveModel = cfg.model;
+  if (wantsAutoFree(cfg)) {
+    const resolved = await resolveAutoFreeModel(cfg);
+    if (!resolved) {
+      throw new LlmError("Automatic free routing found no zero-cost model in the OpenRouter catalogue right now");
+    }
+    effectiveModel = resolved;
+  }
+
   const body: Record<string, unknown> = {
     messages,
     temperature: opts?.temperature ?? 0.2,
     max_tokens: opts?.maxTokens ?? 900,
   };
-  if (cfg.model) body.model = cfg.model;
+  if (effectiveModel) body.model = effectiveModel;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 30_000);
@@ -124,7 +203,7 @@ export async function chatComplete(
     const model =
       typeof (data as { model?: unknown })?.model === "string"
         ? (data as { model: string }).model
-        : cfg.model || "llm";
+        : effectiveModel || "llm";
     return { content, model };
   } catch (err) {
     if (err instanceof LlmError) throw err;

@@ -3,19 +3,24 @@
 /**
  * SYSTEM — platform health page.
  *
- * Service status for the RazorShield risk pipeline (rendered from
- * SYSTEM_SERVICES), live environment metadata driven by the app store
- * (demoMode / connection), demo controls for the offline recovery state,
- * and the recent event log from NOTIFICATIONS.
+ * Everything on this page is measured live against the real backend via
+ * useSystemHealth(): database round-trip latency, ledger/customer/audit
+ * counts, the investigation queue depth and the LLM endpoint state. The
+ * "Recent events" panel streams the persisted audit trail (useAuditTrail).
+ *
+ * The demo controls are explicitly labelled: seeding inserts a synthetic
+ * payment batch scored by the deterministic rules engine; clearing removes
+ * demo-labelled rows only.
  */
 
-import { Fragment, useEffect } from "react";
+import { Fragment, useEffect, useMemo } from "react";
 import { motion } from "framer-motion";
 import {
   Archive,
   ArrowRight,
   Database,
   Gauge,
+  Loader2,
   Radio,
   Sparkles,
   Wifi,
@@ -24,13 +29,14 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { StatusDot } from "@/components/shared/StatusDot";
-import { NOTIFICATIONS, SYSTEM_SERVICES } from "@/data/mockData";
-import type { AppNotification } from "@/types";
+import { EmptyState } from "@/components/shared/States";
+import { useAuditTrail, useDemoControls, useSystemHealth } from "@/hooks/useLedger";
+import { useToast } from "@/hooks/use-toast";
 import { useAppStore } from "@/store/appStore";
 import { formatNumber, relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-/** Presentation order of the pipeline — service metadata comes from data. */
+/** Presentation order of the pipeline — metadata is built from live health data. */
 const PIPELINE_STAGES: { id: string; icon: LucideIcon }[] = [
   { id: "events", icon: Radio },
   { id: "features", icon: Database },
@@ -57,12 +63,47 @@ const SERVICE_TONE: Record<
   },
 };
 
-const NOTIFICATION_DOT: Record<AppNotification["tone"], "red" | "amber" | "violet"> = {
-  critical: "red",
-  high: "red",
-  medium: "amber",
-  intel: "violet",
-};
+/** Audit-event dot tone — derived from the persisted action string. */
+function auditDotTone(action: string, actor: string): "red" | "amber" | "violet" | "green" {
+  if (action.includes("BLOCK")) return "red";
+  if (actor === "ANALYST") return "violet";
+  if (action.startsWith("DEMO_")) return "violet";
+  if (action.includes("SCORED") || action.includes("CREATED")) return "green";
+  return "amber";
+}
+
+/** "TRANSACTION_SCORED" → "Transaction scored" */
+function prettifyAction(action: string): string {
+  return action
+    .toLowerCase()
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+interface ServiceRow {
+  id: string;
+  name: string;
+  status: "operational" | "degraded" | "offline";
+  latencyMs: number | null;
+  records: { label: string; value: number } | null;
+  detail: string;
+}
+
+function ServiceRowSkeleton() {
+  return (
+    <div className="flex items-center gap-3 px-4 py-3.5" role="status" aria-label="Loading service status">
+      <div className="h-2 w-2 rounded-full bg-slate-500/20 animate-pulse" />
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <div className="h-3 w-32 rounded bg-slate-500/12 animate-pulse" />
+        <div className="h-2.5 w-52 rounded bg-slate-500/8 animate-pulse" style={{ animationDelay: "100ms" }} />
+      </div>
+      <div className="hidden sm:block h-3 w-14 rounded bg-slate-500/8 animate-pulse" style={{ animationDelay: "180ms" }} />
+      <div className="hidden md:block h-3 w-16 rounded bg-slate-500/8 animate-pulse" style={{ animationDelay: "240ms" }} />
+      <div className="h-4 w-16 rounded bg-slate-500/10 animate-pulse" style={{ animationDelay: "300ms" }} />
+    </div>
+  );
+}
 
 export function SystemView() {
   const connection = useAppStore((s) => s.connection);
@@ -74,19 +115,122 @@ export function SystemView() {
   const refreshLlmStatus = useAppStore((s) => s.refreshLlmStatus);
   const setAiConfigOpen = useAppStore((s) => s.setAiConfigOpen);
 
+  const { data: health, isLoading: healthLoading, isError: healthError, refetch: refetchHealth } = useSystemHealth();
+  const { seed, clear } = useDemoControls();
+  const { toast: showToast } = useToast();
+  const { data: auditEvents, isLoading: auditLoading } = useAuditTrail(undefined, 8);
+
   /* Keep the AI investigator row honest — resolve on mount. */
   useEffect(() => {
     void refreshLlmStatus();
   }, [refreshLlmStatus]);
 
   const offline = connection === "offline";
-  const servicesById = new Map(SYSTEM_SERVICES.map((svc) => [svc.id, svc]));
-  const operationalCount = SYSTEM_SERVICES.filter((s) => s.status === "operational").length;
+
+  /* Service rows built from the live health probe — no hardcoded latencies. */
+  const services = useMemo<ServiceRow[]>(() => {
+    if (!health) return [];
+    const dbLatency = health.database.latencyMs;
+    const openCases = health.queue.investigating + health.queue.underReview;
+    return [
+      {
+        id: "engine",
+        name: "Risk Engine",
+        status: health.database.ok ? (offline ? "degraded" : "operational") : "offline",
+        latencyMs: dbLatency,
+        records: { label: "rows", value: health.counts.transactions },
+        detail: `Deterministic rules engine · ${health.engine.version} · ${health.engine.kind}`,
+      },
+      {
+        id: "ai",
+        name: "AI Investigator",
+        status: "operational",
+        latencyMs: null,
+        records: null,
+        detail: health.llm.configured
+          ? `LLM live · ${health.llm.provider ?? "custom"} · ${health.llm.model ?? "endpoint default"}`
+          : "Heuristic mode — connect an LLM from the top bar",
+      },
+      {
+        id: "features",
+        name: "Feature Store",
+        status: health.database.ok ? "operational" : "offline",
+        latencyMs: dbLatency,
+        records: { label: "customers", value: health.counts.customers },
+        detail: `${formatNumber(health.counts.customers)} customer profiles in SQLite`,
+      },
+      {
+        id: "events",
+        name: "Event Stream",
+        status: health.database.ok ? (offline ? "degraded" : "operational") : "offline",
+        latencyMs: dbLatency,
+        records: { label: "audit events", value: health.counts.auditEvents },
+        detail: `${formatNumber(health.counts.auditEvents)} events appended to the audit log`,
+      },
+      {
+        id: "cases",
+        name: "Case Store",
+        status: health.database.ok ? "operational" : "offline",
+        latencyMs: dbLatency,
+        records: { label: "open cases", value: openCases },
+        detail: `${formatNumber(openCases)} open investigations in the queue`,
+      },
+    ];
+  }, [health, offline]);
+
+  const servicesById = new Map(services.map((svc) => [svc.id, svc]));
+  const operationalCount = services.filter((s) => s.status === "operational").length;
+
+  /* ---------------- demo controls ---------------- */
+
+  const handleSeed = async () => {
+    try {
+      const res = await seed.mutateAsync();
+      showToast({
+        title: "Demo records loaded",
+        description: `${formatNumber(res.created)} synthetic payments created${
+          res.skipped > 0 ? ` · ${formatNumber(res.skipped)} already present` : ""
+        }.`,
+      });
+    } catch (err) {
+      showToast({
+        title: "Could not load demo records",
+        description: err instanceof Error ? err.message : "The demo endpoint is unreachable.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleClear = async () => {
+    if (
+      !window.confirm(
+        "Remove all demo-labelled rows from the ledger? Imported and manual rows are kept.",
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await clear.mutateAsync();
+      showToast({
+        title: "Demo data cleared",
+        description: `${formatNumber(res.deleted)} demo-labelled rows deleted.`,
+      });
+    } catch (err) {
+      showToast({
+        title: "Could not clear demo data",
+        description: err instanceof Error ? err.message : "The demo endpoint is unreachable.",
+        variant: "destructive",
+      });
+    }
+  };
 
   const envRows: { label: string; value: string; tone?: "good" | "bad" }[] = [
     { label: "Deployment", value: "Local demo sandbox" },
-    { label: "Region", value: "ap-south-1 (Mumbai)" },
-    { label: "Data source", value: "Deterministic synthetic mock data" },
+    {
+      label: "Risk engine",
+      value: health ? `${health.engine.version} · ${health.engine.kind}` : "—",
+    },
+    { label: "Data source", value: "SQLite ledger (Prisma) · demo arrivals labelled demo" },
     {
       label: "AI investigator",
       value: llmStatus?.configured
@@ -101,7 +245,10 @@ export function SystemView() {
       value: offline ? "Disconnected" : "Connected",
       tone: offline ? "bad" : "good",
     },
-    { label: "Audit log", value: "Enabled · append-only" },
+    {
+      label: "Audit log",
+      value: health ? `Enabled · append-only · ${formatNumber(health.counts.auditEvents)} events` : "Enabled · append-only",
+    },
   ];
 
   return (
@@ -116,7 +263,7 @@ export function SystemView() {
         <p className="micro mb-1.5 text-slate-500">Platform health</p>
         <h1 className="text-xl font-semibold tracking-tight text-slate-50 sm:text-2xl">System</h1>
         <p className="mt-1 text-[13px] text-slate-500">
-          Service status for the RazorShield risk pipeline.
+          Service status for the RazorShield risk pipeline, measured against the live ledger.
         </p>
       </motion.header>
 
@@ -138,7 +285,6 @@ export function SystemView() {
           <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap">
             {PIPELINE_STAGES.map((stage, i) => {
               const svc = servicesById.get(stage.id);
-              if (!svc) return null;
               const Icon = stage.icon;
               const dimmed = offline && stage.id === "engine";
               return (
@@ -160,9 +306,9 @@ export function SystemView() {
                   >
                     <Icon className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden />
                     <div className="min-w-0">
-                      <p className="truncate text-[12px] font-medium text-slate-200">{svc.name}</p>
+                      <p className="truncate text-[12px] font-medium text-slate-200">{svc?.name ?? "…"}</p>
                       <p className="num text-[10.5px] text-slate-500">
-                        {formatNumber(svc.latencyMs)} ms
+                        {svc ? (svc.latencyMs != null ? `${formatNumber(svc.latencyMs)} ms` : "no latency probe") : "measuring"}
                       </p>
                     </div>
                   </motion.div>
@@ -184,53 +330,127 @@ export function SystemView() {
         <div className="flex items-center justify-between gap-4 border-b border-line px-4 py-3">
           <h2 className="micro-11 font-semibold text-slate-200">Services</h2>
           <span className="micro text-slate-500">
-            {operationalCount}/{SYSTEM_SERVICES.length} operational
+            {health ? `${operationalCount}/${services.length} operational` : "measuring"}
           </span>
         </div>
         <div className="divide-y divide-line/60">
-          {SYSTEM_SERVICES.map((svc, i) => {
-            const tone = SERVICE_TONE[svc.status];
-            return (
-              <motion.div
-                key={svc.id}
-                initial={{ opacity: 0, x: 8 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.18 + i * 0.06, duration: 0.3 }}
-                className="flex items-center gap-3 px-4 py-3"
-              >
-                <StatusDot
-                  tone={tone.dot}
-                  pulse={svc.status === "operational"}
-                  label={`${svc.name} ${svc.status}`}
+          {healthLoading || (!healthError && services.length === 0)
+            ? [0, 1, 2, 3, 4].map((i) => <ServiceRowSkeleton key={i} />)
+            : healthError ? (
+                <EmptyState
+                  icon={<WifiOff className="h-5 w-5 text-risk-medium" aria-hidden />}
+                  title="Health probe unreachable"
+                  body="Service status is unavailable right now — no cached or invented latencies are shown."
+                  action={
+                    <Button
+                      variant="outline"
+                      onClick={() => void refetchHealth()}
+                      className="gap-2 border-line bg-surface-2 hover:bg-surface-3"
+                    >
+                      <Loader2 className="h-3.5 w-3.5" aria-hidden /> Retry probe
+                    </Button>
+                  }
                 />
-                <div className="min-w-0 flex-1">
-                  <p className="text-[13px] font-medium text-slate-200">{svc.name}</p>
-                  <p className="text-[11px] text-slate-500">
-                    {svc.id === "ai" && llmStatus
-                      ? llmStatus.configured
-                        ? `LLM live · ${llmStatus.model || "endpoint default"}`
-                        : "Heuristic mode — connect an LLM from the top bar"
-                      : svc.detail}
-                  </p>
-                </div>
-                <div className="hidden text-right sm:block">
-                  <p className="micro text-slate-600">Latency</p>
-                  <p className="num text-[12px] text-slate-300">
-                    {formatNumber(svc.latencyMs)} ms
-                  </p>
-                </div>
-                <div className="hidden text-right md:block">
-                  <p className="micro text-slate-600">30d uptime</p>
-                  <p className="num text-[12px] text-slate-300">{svc.uptimeP30d}</p>
-                </div>
-                <span
-                  className={cn("micro shrink-0 rounded-sm border px-1.5 py-0.5", tone.chip)}
-                >
-                  {svc.status}
-                </span>
-              </motion.div>
-            );
-          })}
+              ) : (
+                services.map((svc, i) => {
+                  const tone = SERVICE_TONE[svc.status];
+                  return (
+                    <motion.div
+                      key={svc.id}
+                      initial={{ opacity: 0, x: 8 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.18 + i * 0.06, duration: 0.3 }}
+                      className="flex items-center gap-3 px-4 py-3"
+                    >
+                      <StatusDot
+                        tone={tone.dot}
+                        pulse={svc.status === "operational"}
+                        label={`${svc.name} ${svc.status}`}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[13px] font-medium text-slate-200">{svc.name}</p>
+                        <p className="text-[11px] text-slate-500">
+                          {svc.id === "ai" && llmStatus
+                            ? llmStatus.configured
+                              ? `LLM live · ${llmStatus.model || "endpoint default"}`
+                              : "Heuristic mode — connect an LLM from the top bar"
+                            : svc.detail}
+                        </p>
+                      </div>
+                      <div className="hidden text-right sm:block">
+                        <p className="micro text-slate-600">Latency</p>
+                        <p className="num text-[12px] text-slate-300">
+                          {svc.latencyMs != null ? `${formatNumber(svc.latencyMs)} ms` : "—"}
+                        </p>
+                      </div>
+                      <div className="hidden text-right md:block">
+                        <p className="micro text-slate-600">{svc.records?.label ?? "Records"}</p>
+                        <p className="num text-[12px] text-slate-300">
+                          {svc.records ? formatNumber(svc.records.value) : "—"}
+                        </p>
+                      </div>
+                      <span
+                        className={cn("micro shrink-0 rounded-sm border px-1.5 py-0.5", tone.chip)}
+                      >
+                        {svc.status}
+                      </span>
+                    </motion.div>
+                  );
+                })
+              )}
+        </div>
+      </motion.section>
+
+      {/* Demo data */}
+      <motion.section
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.16, duration: 0.35, ease: "easeOut" }}
+        className="panel mt-5 overflow-hidden"
+        aria-label="Demo data"
+      >
+        <div className="flex items-center justify-between gap-4 border-b border-line px-4 py-3">
+          <h2 className="micro-11 font-semibold text-slate-200">Demo data</h2>
+          <span className="micro text-slate-500">synthetic · labelled demo</span>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-4 p-4">
+          <div className="min-w-0">
+            <p className="micro text-slate-500">Ledger rows</p>
+            <p className="num mt-1 text-[22px] font-semibold leading-none text-slate-100">
+              {health ? formatNumber(health.counts.transactions) : "—"}
+            </p>
+            <p className="mt-2 max-w-[420px] text-[11px] leading-relaxed text-slate-500">
+              Seeding inserts a labelled synthetic payment batch scored by the deterministic rules
+              engine. Clearing removes demo-labelled rows only — imported and manual rows are kept.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <Button
+              onClick={() => void handleSeed()}
+              disabled={seed.isPending}
+              className="gap-2 border border-risk-low/40 bg-risk-low/10 text-[12px] font-semibold text-risk-low hover:bg-risk-low/20"
+            >
+              {seed.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Database className="h-3.5 w-3.5" aria-hidden />
+              )}
+              {seed.isPending ? "Loading…" : "Load demo records"}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleClear()}
+              disabled={clear.isPending}
+              className="gap-2 border-risk-critical/30 bg-surface-1 text-[12px] font-medium text-risk-critical hover:bg-risk-critical/10 hover:text-risk-critical"
+            >
+              {clear.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <WifiOff className="h-3.5 w-3.5" aria-hidden />
+              )}
+              {clear.isPending ? "Clearing…" : "Clear demo data"}
+            </Button>
+          </div>
         </div>
       </motion.section>
 
@@ -238,7 +458,7 @@ export function SystemView() {
       <motion.section
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.18, duration: 0.35, ease: "easeOut" }}
+        transition={{ delay: 0.2, duration: 0.35, ease: "easeOut" }}
         className="panel mt-5 overflow-hidden"
         aria-label="Environment"
       >
@@ -325,33 +545,51 @@ export function SystemView() {
         >
           <div className="flex items-center justify-between gap-4 border-b border-line px-4 py-3">
             <h2 className="micro-11 font-semibold text-slate-200">Recent events</h2>
-            <span className="micro text-slate-500">
-              {NOTIFICATIONS.filter((n) => !n.read).length} unread
-            </span>
+            <span className="micro text-slate-500">persisted audit trail · newest first</span>
           </div>
-          <div className="divide-y divide-line/60">
-            {NOTIFICATIONS.map((n, i) => (
-              <motion.div
-                key={n.id}
-                initial={{ opacity: 0, x: 8 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.3 + i * 0.06, duration: 0.3 }}
-                className="flex items-start gap-3 px-4 py-3"
-              >
-                <StatusDot
-                  tone={NOTIFICATION_DOT[n.tone]}
-                  className="mt-[5px]"
-                  label={n.tone}
-                />
-                <div className="min-w-0 flex-1">
-                  <p className="text-[12.5px] font-medium text-slate-200">{n.title}</p>
-                  <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">{n.body}</p>
+          <div className="max-h-72 divide-y divide-line/60 overflow-y-auto">
+            {auditLoading ? (
+              [0, 1, 2, 3].map((i) => (
+                <div key={i} className="flex items-start gap-3 px-4 py-3" role="status" aria-label="Loading event">
+                  <div className="mt-1 h-2 w-2 rounded-full bg-slate-500/20 animate-pulse" />
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <div className="h-3 w-40 rounded bg-slate-500/12 animate-pulse" />
+                    <div className="h-2.5 w-56 rounded bg-slate-500/8 animate-pulse" style={{ animationDelay: "90ms" }} />
+                  </div>
                 </div>
-                <time className="num shrink-0 pt-0.5 text-[11px] text-slate-600">
-                  {relativeTime(n.time)}
-                </time>
-              </motion.div>
-            ))}
+              ))
+            ) : !auditEvents || auditEvents.length === 0 ? (
+              <div className="px-4 py-8 text-center">
+                <p className="text-[12px] text-slate-500">
+                  No audit events yet — every scoring run and analyst decision is appended here.
+                </p>
+              </div>
+            ) : (
+              auditEvents.map((event, i) => (
+                <motion.div
+                  key={event.id}
+                  initial={{ opacity: 0, x: 8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: Math.min(i * 0.04, 0.3), duration: 0.3 }}
+                  className="flex items-start gap-3 px-4 py-3"
+                >
+                  <StatusDot
+                    tone={auditDotTone(event.action, event.actor)}
+                    className="mt-[5px]"
+                    label={event.actor}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[12.5px] font-medium text-slate-200">{prettifyAction(event.action)}</p>
+                    <p className="num mt-0.5 truncate text-[11.5px] text-slate-500">
+                      {event.actor} · {event.entityId}
+                    </p>
+                  </div>
+                  <time className="num shrink-0 pt-0.5 text-[11px] text-slate-600">
+                    {relativeTime(event.time)}
+                  </time>
+                </motion.div>
+              ))
+            )}
           </div>
         </motion.section>
       </div>

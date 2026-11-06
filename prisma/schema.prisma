@@ -74,3 +74,121 @@ model DatasetRow {
   @@index([datasetId])
   @@index([datasetId, riskLevel])
 }
+
+// ---------------------------------------------------------------------------
+// Ledger models — the transactional source of truth for the whole app.
+// The dashboard, ledger, investigations and metrics all read from these;
+// Dataset Studio remains a batch-analysis workspace on top of the engine.
+// ---------------------------------------------------------------------------
+
+/// A payment customer. Identity + slow-changing profile only — rolling
+/// statistics (avg/median ticket, usual device/location, incident count)
+/// are derived from stored transactions so they can never drift.
+model Customer {
+  id             String        @id
+  name           String        @default("")
+  /// FULL KYC | MIN KYC | PENDING
+  kycTier        String        @default("MIN KYC")
+  /// normal | watch | elevated — analyst-facing portfolio note.
+  riskProfile    String        @default("normal")
+  priorIncidents Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  transactions   Transaction[]
+
+  @@index([riskProfile])
+}
+
+/// A scored payment stored in the ledger. Every stage of the lifecycle
+/// (scoring, investigation, analyst decision) works on these rows.
+model Transaction {
+  id             String         @id
+  amount         Float
+  currency       String         @default("INR")
+  customerId     String
+  customer       Customer       @relation(fields: [customerId], references: [id])
+  customerName   String         @default("")
+  merchant       String         @default("")
+  location       String         @default("")
+  device         String         @default("")
+  paymentMethod  String         @default("")
+  /// When the payment entered the engine.
+  timestamp      DateTime
+  riskScore      Float          @default(0)
+  /// LOW | MEDIUM | HIGH | CRITICAL
+  riskLevel      String         @default("LOW")
+  /// ALLOW | REVIEW | HOLD | BLOCK — engine recommendation.
+  recommendation String?
+  /// EVALUATING | MONITORING | INVESTIGATING | UNDER_REVIEW | ON_HOLD | BLOCKED | ALLOWED
+  status         String         @default("MONITORING")
+  isNewDevice    Boolean        @default(false)
+  /// Fired signals, JSON-encoded RiskSignal[].
+  signalsJson    String         @default("[]")
+  /// Data-quality warnings collected at scoring time, JSON-encoded string[].
+  warningsJson   String         @default("[]")
+  aiSummary      String?
+  confidence     Float?
+  /// demo | import | manual — drives honest labeling + demo-only clearing.
+  dataSource     String         @default("demo")
+  /// Ground-truth fraud label when known (1/0), else null.
+  label          Int?
+  investigation  Investigation?
+  auditEvents    AuditEvent[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([timestamp])
+  @@index([customerId])
+  @@index([status])
+  @@index([riskLevel])
+  @@index([dataSource])
+}
+
+/// Persisted AI/heuristic investigation of one transaction (latest wins).
+model Investigation {
+  id                        String      @id @default(cuid())
+  transaction               Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  transactionId             String      @unique
+  /// llm | heuristic
+  mode                      String
+  /// openrouter | gemini | groq | ollama | custom | env — provider actually used.
+  provider                  String?
+  modelId                   String?
+  /// Analyst-facing risk narrative (evidence → interpretation → action).
+  riskAssessment            String      @default("")
+  recommendedAction         String      @default("REVIEW")
+  confidence                Float?
+  supportingEvidenceJson    String      @default("[]")
+  contradictingEvidenceJson String      @default("[]")
+  uncertaintiesJson         String      @default("[]")
+  /// ANALYZING | COMPLETE | FAILED
+  status                    String      @default("COMPLETE")
+  /// Why the LLM fell back to heuristics, when it did.
+  fallbackReason            String?
+  latencyMs                 Int?
+  analystAction             String?
+  analystNote               String?
+  resolvedAt                DateTime?
+  createdAt                 DateTime    @default(now())
+
+  @@index([transactionId])
+}
+
+/// Append-only audit log for system, engine and analyst actions.
+/// transactionId uses SetNull so the trail survives transaction deletion.
+model AuditEvent {
+  id            String       @id @default(cuid())
+  /// SYSTEM | AI ENGINE | RISK MODEL | ANALYST
+  actor         String
+  /// TRANSACTION_CREATED | TRANSACTION_SCORED | INVESTIGATION_COMPLETED | DECISION_RECORDED | STATUS_CHANGED | DATASET_IMPORTED | DEMO_SEEDED | DEMO_CLEARED | TRANSACTION_DELETED
+  action        String
+  entityType    String
+  entityId      String
+  detailJson    String       @default("{}")
+  transaction   Transaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+  transactionId String?
+  createdAt     DateTime     @default(now())
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+}

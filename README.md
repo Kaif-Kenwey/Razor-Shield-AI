@@ -17,17 +17,21 @@ RazorShield AI puts the whole loop in one workspace instead of four tabs. The ru
 
 ---
 
-## The demo case
+## The seeded demo cases
 
-The flagship case the product opens on — fully deterministic, no network required:
+`bun run db:seed` loads a reproducible synthetic portfolio built to exercise every rule honestly (each row labelled `dataSource="demo"`):
 
 ```
-TXN_8F21A9 · ₹48,500 · CUS_10482 · Mumbai
-Risk score 92/100 · CRITICAL · RECOMMENDATION: BLOCK (confidence 94%)
-Signals: New device · Unusual amount 6.4× · Location anomaly · Velocity spike (5 txns / 3 min)
-```
+High-value spike   TXN_D… · ₹1,85,000 · CUS_D01 · Surat
+                   Risk HIGH — high-value + ≥10× customer median + location drift
 
-The customer profile contradicts the alarm — 2y 4m tenure, 184 transactions, avg ticket ₹7,540, clean except 2 prior flags — which is exactly the tension the investigator walks the analyst through before recommending BLOCK.
+Velocity burst     6 payments ₹12-18k in 10 minutes on one card
+                   Risk HIGH — velocity + unusual-amount stack
+
+Mule ring          3 accounts · 6 payments · one BURNER-D900 device · QuickMart Kiosk
+                   Per-row scores LOW (by design — each mule looks normal alone);
+                   the Fraud Network panel links them and reports the missed rows
+```
 
 ## The investigation loop
 
@@ -82,10 +86,10 @@ Three tools live under the scored results, because a score without instruments i
 
 ## Honest limitations
 
-- The engine is a **deterministic rule system**, not a trained ML model. The Detection Benchmark page is a demo snapshot and labeled as such; the real, reproducible numbers live in Dataset Studio on whatever data you import.
-- The LLM investigator is only as good as the endpoint you give it; latency runs a few seconds and a timeout falls back to heuristics (the UI says which).
-- The live console feed is a deterministic demo script, not a real gateway — swapping in a live source is a service-layer change by design.
-- The sample dataset is 58 rows. Every percentage on it is a demonstration of method, not statistical proof; bring a real file.
+- The engine is a **deterministic rule system**, not a trained ML model. The Detection Benchmark computes precision/recall/F1 and the confusion matrix **only over rows that carry ground-truth labels** in the ledger — unlabelled payments are excluded rather than guessed, and the page says so.
+- The LLM investigator is only as good as the endpoint you give it; latency runs a few seconds and a timeout falls back to heuristics (the UI says which). Free-tier models carry provider rate limits; the *Automatic Free Model* route is only as available as OpenRouter's current $0 catalogue.
+- The live feed in DEMO mode is a synthetic generator writing to the real ledger with `dataSource="demo"` — labelled as such in the UI. There is **no real payment gateway**; swapping one in is a service-layer change by design.
+- Demo percentages (precision 57% on the seeded 80 rows, say) are demonstrations of method, not statistical proof; import a real labelled file for real numbers.
 - The fraud-graph currently links on shared device fingerprints; adding IP/email/address edges is roadmap work.
 - Persistence is local-first SQLite — right for the demo, not for scale. A production deployment would swap it for managed PostgreSQL (the Prisma schema ports as-is); nothing else in the app assumes a single machine.
 
@@ -93,18 +97,37 @@ Three tools live under the scored results, because a score without instruments i
 
 - **Next.js 16** (App Router, single-route SPA) + **TypeScript 5**
 - **Tailwind CSS 4** + **shadcn/ui** (New York) + Lucide icons
-- **framer-motion** (transitions), **recharts** (charts), **zustand** (state, persisted)
-- **Prisma + SQLite** — Dataset Studio persists every analysis run server-side
+- **framer-motion** (transitions), **recharts** (charts)
+- **zustand** (analyst workspace state) + **TanStack Query** (server state: 5s metrics polling, ledger pages, mutations)
+- **Prisma + SQLite** — the ledger is the single source of truth: transactions, customers, investigations and the audit trail
 - **bun** as the runtime / package manager
 - Type system: Space Grotesk for display, IBM Plex Sans/Mono for UI and data
 
-## Architecture: two data paths, one engine philosophy
+## Architecture: one ledger, every surface reads it
 
-**Live console** — all data flows through a service abstraction (`src/services/api.ts`) over a deterministic mock layer. The flag `USE_REMOTE=false` currently serves mocks; flipping it to `true` routes the same typed contracts (`src/types/index.ts`) at real endpoints. Swapping in a live risk feed requires **no component changes** — only the service layer changes.
+**The ledger is the source of truth.** Everything the dashboard shows — metrics, queues, charts, the audit trail — is computed from SQLite at request time (`/api/risk/metrics`, `/api/system/health`, `/api/model/performance`). There is no mock fallback: when the database is empty the UI says so and offers the seed/import actions.
 
-**Dataset Studio** — a real server path end to end: `src/lib/csv.ts` (parse + map, client) → `POST /api/datasets/analyze` → `src/lib/riskEngine.ts` (scoring + metrics, server) → Prisma/SQLite persistence → typed results back to the dashboard.
+**Ingestion & scoring** — every record (manual, CSV import, demo generator) goes through one shared service (`src/lib/server/scoringService.ts`): load the customer's stored history + recent portfolio context, run the existing `scoreBatch` unchanged, persist the score, signals and audit rows in one Prisma transaction. Rules that need history (velocity, impossible travel, method switch) always see real context — a transaction is never scored in isolation.
 
-**Investigation** — `POST /api/investigate` hands rule-engine evidence to the configured LLM (`src/lib/agent/`, provider-agnostic via the in-app AI panel or `LLM_BASE_URL`/`LLM_API_KEY`) and returns a validated structured verdict; without credentials it returns the heuristic verdict. The engine, graph module, similarity and simulator are all pure TypeScript with no I/O — the same code runs in a worker, a cron job, or another runtime unchanged.
+**Dataset Studio** — unchanged batch path: `src/lib/csv.ts` (parse + map, client) → `POST /api/datasets/analyze` → `src/lib/riskEngine.ts` (server) → persisted runs. The added **Import to ledger** action feeds the same rows through the shared scoring service with per-customer context.
+
+**Investigation** — `POST /api/investigate` loads the ledger row server-side, hands rule-engine evidence to the configured LLM (`src/lib/agent/`, provider-agnostic via the in-app panel or `LLM_BASE_URL`/`LLM_API_KEY`), validates the verdict, and **persists it** (provider, model id, latency, fallback reason) alongside an audit event. Without credentials it returns the heuristic verdict — also persisted, also labelled. The engine, graph module, similarity and simulator remain pure TypeScript with no I/O.
+
+## API surface
+
+| Route | What it does |
+|---|---|
+| `GET/POST/PATCH /api/transactions` | paginated+filtered ledger; create→score→persist; status transitions |
+| `GET/PATCH/DELETE /api/transactions/:id` | full case file (txn + customer + audit); analyst decision; restricted delete |
+| `POST /api/transactions/import` | Dataset Studio → ledger bulk import (duplicates reported, never silently dropped) |
+| `GET /api/customers` · `/api/customers/:id` | profiles derived live from the ledger — nothing stored twice |
+| `GET /api/risk/metrics` | every dashboard statistic as live SQL aggregates |
+| `GET /api/model/performance` | precision/recall/F1 on labelled rows only; `insufficientData` state below 12 labels |
+| `GET /api/system/health` | measured db latency, counts, queue depth, LLM state |
+| `GET /api/audit` | persisted audit trail (survives transaction deletion) |
+| `POST/DELETE /api/demo` | DEMO SIMULATION: seed / arrival / clear-only-demo |
+| `POST /api/investigate` | LLM or heuristic investigation, validated + persisted |
+| `GET/POST/DELETE /api/llm-config` · `POST /api/llm-config/test` · `POST /api/llm/models` | AI panel: status, key storage (server-only), live probe, live model catalogues |
 
 ## Getting started
 
@@ -112,13 +135,48 @@ Prerequisites: [bun](https://bun.sh) ≥ 1.1
 
 ```bash
 bun install
-bun run db:push     # create the local SQLite database (db/custom.db)
+bun run db:push     # create/sync the local SQLite database (db/custom.db)
+bun run db:seed     # optional: load the labelled synthetic demo portfolio (80 rows)
 bun run dev         # http://localhost:3000
 ```
 
-Environment: copy `.env.example` to `.env`. `DATABASE_URL` works with zero configuration. The LLM investigator is **optional** — set `LLM_BASE_URL`, `LLM_API_KEY` (and optionally `LLM_MODEL`) to any OpenAI-compatible endpoint (OpenAI, Groq, Together, a private gateway, or local Ollama/vLLM) and the investigator goes live; leave them empty and the deterministic heuristic investigator answers, clearly labeled.
+Environment: copy `.env.example` to `.env`. `DATABASE_URL` works with zero configuration. The LLM investigator is **optional** — without it the deterministic heuristic investigator answers, clearly labeled.
 
-No file editing needed either way: click the **AI** button in the top bar, pick a preset (OpenAI, Groq, local Ollama), paste a base URL and key, hit **Test connection**, then **Save & activate**. The key is probed live before saving, stored server-side in `db/llm-config.json` (gitignored), never returned to the browser, and the in-app config overrides `.env` — disconnect to fall back.
+### Connecting an LLM (no file editing needed)
+
+Click the **AI** button in the top bar and pick a provider card:
+
+| Provider | Key | Model catalogue |
+|---|---|---|
+| **OpenRouter** | [openrouter.ai/keys](https://openrouter.ai/keys) | fetched live; **FREE** labels come from each model's own pricing metadata, plus an *Automatic Free Model* route that resolves to a currently-$0 model |
+| **Google Gemini** | [AI Studio](https://aistudio.google.com/apikey) | fetched live from the OpenAI-compatible endpoint |
+| **Groq** | [console.groq.com/keys](https://console.groq.com/keys) | fetched live |
+| **Ollama (local)** | none — runs on your machine | your installed models only, fetched from the local server |
+| **Custom endpoint** | your provider's key | type the model id (Together, Fireworks, vLLM, private gateways) |
+
+Paste a key, hit **Test connection** (a real probe — latency and the model that responded are shown), then **Save & activate**. The key is stored server-side in `db/llm-config.json` (gitignored), never returned to the browser, and the in-app config overrides `.env` — disconnect to fall back.
+
+**Privacy:** case evidence (transaction facts + signal summary, with identifiers minimized) is sent to the provider you select. For a nothing-leaves-the-machine setup use Ollama — the panel marks it LOCAL.
+
+## Data ingestion — three ways to populate the ledger
+
+1. **Demo simulation** — `bun run db:seed` (or the empty-state / System-page button) loads a reproducible synthetic portfolio: normal traffic plus high-value, velocity-burst, new-device, odd-hour, structuring and shared-burner mule-ring scenarios, each labelled `dataSource="demo"`. Clear only demo rows any time (System → Clear demo data) — imports and manual entries survive. The DEMO toggle in the top bar also streams synthetic arrivals; they are labelled demo data in the UI, never presented as gateway traffic.
+2. **CSV import** — Dataset Studio scores any CSV/TSV, then **Import to ledger** pushes the mapped rows into the main database, where each row is re-scored server-side against the customer's *stored* history. Ground-truth labels come along and feed the benchmark.
+3. **Manual entry** — Transactions → **New transaction** scores and stores a single payment live: built for the classroom question "what happens if I submit ₹5,00,000 right now?".
+
+## Transaction lifecycle (all stages on stored records)
+
+```
+INGESTION (CSV / manual / demo generator)
+  → SQLite ledger (Prisma: Transaction + Customer)
+  → scoring against stored customer history + portfolio baselines (rse-1.2)
+  → classification (LOW/MEDIUM/HIGH/CRITICAL → ALLOW/REVIEW/HOLD/BLOCK)
+  → alert queue + fraud-graph clustering
+  → AI/heuristic investigation (persisted)
+  → analyst decision (persisted)
+  → audit trail (AuditEvent rows — survives deletion)
+  → dashboard refresh (5s metric polling, 4s feed polling)
+```
 
 ## Project structure
 
@@ -126,31 +184,42 @@ No file editing needed either way: click the **AI** button in the top bar, pick 
 src/
 ├── app/                    # Single-route SPA (page.tsx) + layout + design tokens (globals.css)
 │   └── api/
+│       ├── transactions/   # Ledger CRUD + pagination/filters + bulk import
+│       ├── customers/      # Derived customer profiles
+│       ├── risk/metrics/   # Live dashboard aggregates
+│       ├── model/          # Labelled-row engine evaluation
+│       ├── system/health/  # Measured service status
+│       ├── audit/          # Persisted audit trail
+│       ├── demo/           # DEMO SIMULATION: seed / arrival / clear
 │       ├── datasets/       # Dataset Studio API: analyze, list, detail, delete (Prisma-backed)
-│       └── investigate/    # LLM investigation endpoint (provider-agnostic, validated output)
+│       ├── investigate/    # LLM investigation endpoint (persisted, provider-agnostic)
+│       └── llm-config/     # AI panel: status, save/clear, probe, model catalogues
 ├── components/
 │   ├── dashboard/          # Hero landing, overview, metrics, live feed + cluster events
 │   ├── datastudio/         # Import wizard, mapping, results, Threshold Lab, Fraud Network, Attack Sim
 │   ├── investigation/      # Workspace, AI investigator, sensitivity, notebook, audit trail
-│   ├── model/              # Detection benchmark (demo snapshot, labeled as such)
+│   ├── model/              # Detection benchmark (live labelled-row evaluation)
 │   ├── layout/             # App shell, sidebar, command palette, keyboard layer
+│   ├── providers/          # TanStack Query provider
 │   ├── risk/               # Risk intelligence, badges, score dials
+│   ├── settings/           # Multi-provider AI configuration dialog
 │   ├── shared/  system/ ai/# Shared primitives, engine health, AI status
-│   ├── transactions/       # Payment ledger + transaction detail
+│   ├── transactions/       # Payment ledger + transaction detail + manual entry
 │   └── ui/                 # shadcn/ui primitives
-├── data/                   # Deterministic mock data (flagship case + demo arrival script)
 ├── lib/
 │   ├── riskEngine.ts       # Deterministic batch scorer (rse-1.2)
+│   ├── server/             # scoringService (history-aware), ledger mapping, demo generator
 │   ├── fraudGraph.ts       # Entity-graph ring detector
 │   ├── threshold.ts        # Cost-optimal cutoff sweep
 │   ├── attackSim.ts        # Adversarial attack simulator
 │   ├── similarCases.ts     # Feature-vector precedent recall
-│   ├── agent/              # LLM client + investigator (server-side only)
+│   ├── agent/              # LLM client + investigator + provider registry (server-side only)
 │   └── csv.ts · format.ts · db.ts
-├── services/               # API abstraction (USE_REMOTE switch) + dataset client
+├── services/               # Typed API layer (all methods hit real endpoints)
+├── hooks/                  # React Query hooks + DB-backed live feed
 ├── store/                  # zustand store (view state, demo mode, decisions, personas)
 └── types/                  # Domain contracts (core + dataset)
-prisma/                     # Schema (SQLite): Dataset + DatasetRow
+prisma/                     # Schema (SQLite): Dataset, DatasetRow, Transaction, Customer, Investigation, AuditEvent + seed script
 ```
 
 ## Roadmap

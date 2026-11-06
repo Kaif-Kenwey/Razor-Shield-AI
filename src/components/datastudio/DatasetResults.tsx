@@ -17,6 +17,7 @@ import {
   ArrowDownToLine,
   BadgeCheck,
   Crosshair,
+  DatabaseZap,
   FolderSearch,
   RotateCcw,
   Search,
@@ -47,6 +48,7 @@ import { DataQuality } from "@/components/datastudio/DataQuality";
 import { CalibrationTable } from "@/components/datastudio/CalibrationTable";
 import { useToast } from "@/hooks/use-toast";
 import { useAppStore } from "@/store/appStore";
+import { useImportRows } from "@/hooks/useLedger";
 import { formatINR, formatNumber } from "@/lib/format";
 import type { DatasetAnalysis, ScoredRow } from "@/types/dataset";
 import type { RiskLevel, Transaction } from "@/types";
@@ -242,11 +244,13 @@ export function DatasetResults({
   const { toast } = useToast();
   const injectTransactions = useAppStore((s) => s.injectTransactions);
   const navigate = useAppStore((s) => s.navigate);
+  const importRows = useImportRows();
   const [filter, setFilter] = useState<RowFilter>("all");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [routed, setRouted] = useState(false);
+  const [importedToLedger, setImportedToLedger] = useState(false);
 
   const m = analysis.metrics;
 
@@ -287,6 +291,46 @@ export function DatasetResults({
       description: `${txns.length} scored ${txns.length === 1 ? "transaction" : "transactions"} now appear in Investigations.`,
     });
     setTimeout(() => navigate("investigations"), 700);
+  };
+
+  /** Push every mapped row into the SQLite ledger — each one is re-scored
+   * server-side against the customer's stored history (not the file's
+   * batch baselines). Duplicates are reported, never silently dropped. */
+  const importToLedger = async () => {
+    try {
+      const result = await importRows.mutateAsync({
+        datasetName: analysis.name,
+        rows: analysis.rows.map((r) => ({
+          txnId: r.txnId,
+          amount: r.amount,
+          timestamp: r.timestamp ?? undefined,
+          customerId: r.customerId,
+          customerName: r.customerName || undefined,
+          merchant: r.merchant || undefined,
+          location: r.location || undefined,
+          device: r.device || undefined,
+          paymentMethod: r.paymentMethod || undefined,
+          label: r.label,
+        })),
+      });
+      setImportedToLedger(true);
+      toast({
+        title: `Imported ${result.imported} rows to the ledger`,
+        description: [
+          result.duplicates.length ? `${result.duplicates.length} duplicates skipped` : null,
+          result.failed.length ? `${result.failed.length} failed` : null,
+          "Dashboard and customer stats now reflect these rows.",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      });
+    } catch (err) {
+      toast({
+        title: "Import failed",
+        description: err instanceof Error ? err.message : "Could not reach the import endpoint.",
+        variant: "destructive",
+      });
+    }
   };
 
   const filterPills: { key: RowFilter; label: string; count: number | null }[] = [
@@ -330,6 +374,20 @@ export function DatasetResults({
           <Button variant="outline" size="sm" onClick={onReset} className="gap-1.5">
             <RotateCcw className="h-3.5 w-3.5" aria-hidden />
             New import
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            disabled={importedToLedger || importRows.isPending}
+            onClick={() => void importToLedger()}
+          >
+            <DatabaseZap className="h-3.5 w-3.5" aria-hidden />
+            {importRows.isPending
+              ? "Importing…"
+              : importedToLedger
+                ? "In ledger ✓"
+                : `Import ${analysis.rowCount} rows to ledger`}
           </Button>
           <Button
             variant="outline"

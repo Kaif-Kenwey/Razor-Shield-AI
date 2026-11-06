@@ -36,7 +36,7 @@ const TONE_STROKE = {
   intel: "rgba(167,139,250,0.75)",
 } as const;
 
-/** Hand-rolled SVG sparkline — lighter than a chart library for 12 points. */
+/** Hand-rolled SVG sparkline — lighter than a chart library for a dozen points. */
 function Sparkline({ points, tone }: { points: number[]; tone: RiskMetric["tone"] }) {
   const path = useMemo(() => {
     const w = 100;
@@ -98,10 +98,25 @@ function useCountUp(target: number, duration = 1.2) {
   return value;
 }
 
-export function MetricCard({ metric, index = 0 }: { metric: RiskMetric; index?: number }) {
+/**
+ * One command-center metric tile.
+ *
+ * `spark` — optional live sparkline series (e.g. the real 24h volume buckets
+ * from the ledger). When absent the card falls back to the static demo
+ * series in METRIC_SPARKS so the landing composition never renders empty.
+ */
+export function MetricCard({
+  metric,
+  index = 0,
+  spark,
+}: {
+  metric: RiskMetric;
+  index?: number;
+  spark?: number[];
+}) {
   const value = useCountUp(metric.value);
   const up = (metric.delta ?? 0) >= 0;
-  const spark = METRIC_SPARKS[metric.key];
+  const sparkPoints = spark ?? METRIC_SPARKS[metric.key];
 
   return (
     <motion.div
@@ -129,9 +144,9 @@ export function MetricCard({ metric, index = 0 }: { metric: RiskMetric; index?: 
         <p className={cn("num text-[30px] font-semibold leading-none tracking-tight", TONE_TEXT[metric.tone])}>
           {formatNumber(value)}
         </p>
-        {spark && (
+        {sparkPoints && sparkPoints.length > 1 && (
           <div className="w-24 shrink-0 opacity-80 transition-opacity group-hover:opacity-100">
-            <Sparkline points={spark} tone={metric.tone} />
+            <Sparkline points={sparkPoints} tone={metric.tone} />
             <p className="micro mt-0.5 text-right text-[8.5px] text-slate-600">24h trend</p>
           </div>
         )}

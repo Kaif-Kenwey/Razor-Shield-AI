@@ -44,6 +44,8 @@ export function readRuntimeLlmConfig(): RuntimeLlmConfig | null {
       apiKey,
       model: typeof p.model === "string" ? p.model.trim() : "",
       extraHeaders,
+      provider: typeof p.provider === "string" && p.provider.trim() ? p.provider.trim() : "custom",
+      routing: typeof p.routing === "string" && p.routing.trim() ? p.routing.trim() : undefined,
     };
   } catch {
     // Missing/unreadable file = no runtime config; env (or heuristics) applies.

@@ -3,6 +3,11 @@
 /**
  * HERO — first-load command center landing state.
  * Sets the tone: PAYMENT RISK UNDER INVESTIGATION.
+ *
+ * The stat strip reads the live SQLite ledger through useRiskMetrics(false)
+ * (single fetch, no polling on the landing screen). Numbers render only
+ * what the ledger actually contains — while the fetch is in flight the
+ * tiles pulse instead of showing invented values.
  */
 
 import { motion } from "framer-motion";
@@ -11,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { StatusDot } from "@/components/shared/StatusDot";
 import { AiStatusPill } from "@/components/ai/AiStatusPill";
 import { useAppStore } from "@/store/appStore";
-import { RISK_METRICS } from "@/data/mockData";
+import { useRiskMetrics } from "@/hooks/useLedger";
 import { formatNumber } from "@/lib/format";
 
 const fadeUp = {
@@ -26,6 +31,13 @@ export function HeroLanding() {
   const loading = useAppStore((s) => s.loading);
   const connection = useAppStore((s) => s.connection);
 
+  /* Single fetch — the landing page never polls. */
+  const {
+    data: metrics,
+    isLoading: metricsLoading,
+    isError: metricsError,
+  } = useRiskMetrics(false);
+
   const topCase = transactions.find((t) => t.riskLevel === "CRITICAL" && t.status === "INVESTIGATING");
   /* graceful target: flagship first, else the hottest open case — never a dead CTA,
      even after every critical case has been resolved in this browser */
@@ -35,6 +47,19 @@ export function HeroLanding() {
   const ctaTarget = topCase ?? hottestOpen ?? null;
   /* the CTA needs the live window — a dead click on first paint is worse than a brief wait */
   const ctaReady = !loading && transactions.length > 0;
+
+  /* Live stat strip — blocked comes from the real status distribution. */
+  const totals = metrics?.raw.totals;
+  const blocked =
+    metrics?.raw.statusDistribution.find((s) => s.status === "BLOCKED")?.count ?? 0;
+  const stripLoading = metricsLoading || !metrics;
+  const stripUnavailable = metricsError && !metrics;
+  const statTiles = [
+    { key: "transactions", label: "Transactions analyzed", value: totals?.transactions ?? 0 },
+    { key: "highRisk", label: "High risk", value: totals?.highRisk ?? 0 },
+    { key: "underReview", label: "Under review", value: totals?.pendingInvestigations ?? 0 },
+    { key: "blocked", label: "Blocked", value: blocked },
+  ];
 
   return (
     <section className="relative overflow-hidden" aria-label="RazorShield AI overview">
@@ -109,15 +134,33 @@ export function HeroLanding() {
         <motion.div
           {...fadeUp}
           transition={{ duration: 0.5, delay: 0.34, ease: "easeOut" }}
-          className="mt-14 grid w-full grid-cols-2 gap-px overflow-hidden rounded-sm border border-line bg-line sm:grid-cols-4"
+          className="mt-14 w-full"
           aria-label="Live risk environment"
         >
-          {RISK_METRICS.map((m) => (
-            <div key={m.key} className="bg-surface-1/80 px-4 py-3.5 text-left backdrop-blur-sm">
-              <p className="micro text-slate-500">{m.label}</p>
-              <p className="num mt-1.5 text-lg font-semibold text-slate-100">{formatNumber(m.value)}</p>
-            </div>
-          ))}
+          <p className="micro-11 mb-2 flex items-center justify-center gap-1.5 text-slate-600">
+            <StatusDot tone="green" pulse />
+            live ledger
+          </p>
+          <div className="grid w-full grid-cols-2 gap-px overflow-hidden rounded-sm border border-line bg-line sm:grid-cols-4">
+            {statTiles.map((tile) => (
+              <div key={tile.key} className="bg-surface-1/80 px-4 py-3.5 text-left backdrop-blur-sm">
+                <p className="micro text-slate-500">{tile.label}</p>
+                {stripUnavailable ? (
+                  <p className="num mt-1.5 text-lg font-semibold leading-5 text-slate-600" title="Metrics unavailable">
+                    —
+                  </p>
+                ) : stripLoading ? (
+                  <div
+                    className="mt-2.5 h-5 w-12 rounded bg-slate-500/15 animate-pulse"
+                    role="status"
+                    aria-label={`Loading ${tile.label.toLowerCase()}`}
+                  />
+                ) : (
+                  <p className="num mt-1.5 text-lg font-semibold text-slate-100">{formatNumber(tile.value)}</p>
+                )}
+              </div>
+            ))}
+          </div>
         </motion.div>
 
         <motion.div

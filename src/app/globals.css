@@ -63,90 +63,98 @@
 /*
  * RazorShield AI — dark-only command-center theme.
  * The product is intentionally dark-only: fraud analysts work long sessions
- * on high-density dashboards; a light theme is not part of v1 scope.
+ * on high-density dashboards. Palette direction: refined slate/graphite
+ * surfaces (brighter than the v1 near-black), visible-but-quiet borders,
+ * restrained violet strictly for AI elements, teal for live/positive
+ * accents. Fonts are Space Grotesk / IBM Plex Sans / IBM Plex Mono —
+ * defined in layout.tsx and never changed here.
  */
 :root {
   --radius: 0.5rem;
 
-  --background: #05070b;
-  --foreground: #e7ecf4;
+  --background: #111827;
+  --foreground: #f1f5f9;
 
-  --card: #0a0e15;
-  --card-foreground: #e7ecf4;
-  --popover: #0d1219;
-  --popover-foreground: #e7ecf4;
+  --card: #1e293b;
+  --card-foreground: #f1f5f9;
+  --popover: #1b2537;
+  --popover-foreground: #f1f5f9;
 
-  --primary: #e7ecf4;
-  --primary-foreground: #0a0d13;
-  --secondary: #141a26;
-  --secondary-foreground: #e7ecf4;
-  --muted: #12172280;
-  --muted-foreground: #8b95a9;
-  --accent: #151c2a;
-  --accent-foreground: #e7ecf4;
+  --primary: #f1f5f9;
+  --primary-foreground: #16202f;
+  --secondary: #223047;
+  --secondary-foreground: #f1f5f9;
+  --muted: #1c283e;
+  --muted-foreground: #a8b6c8;
+  --accent: #24334c;
+  --accent-foreground: #f1f5f9;
   --destructive: #ef4444;
-  --border: rgba(148, 163, 184, 0.11);
-  --input: rgba(148, 163, 184, 0.14);
-  --ring: rgba(139, 92, 246, 0.45);
+  --border: #2e3e57;
+  --input: #33455f;
+  --ring: rgba(73, 197, 192, 0.5);
 
-  --chart-1: #34d399;
+  --chart-1: #49c5c0;
   --chart-2: #fbbf24;
   --chart-3: #f87171;
   --chart-4: #a78bfa;
-  --chart-5: #94a3b8;
+  --chart-5: #60a5fa;
 
-  --sidebar: #05070b;
-  --sidebar-foreground: #e7ecf4;
+  --sidebar: #141d2e;
+  --sidebar-foreground: #f1f5f9;
   --sidebar-primary: #a78bfa;
-  --sidebar-primary-foreground: #0a0d13;
-  --sidebar-accent: #121826;
-  --sidebar-accent-foreground: #e7ecf4;
-  --sidebar-border: rgba(148, 163, 184, 0.1);
-  --sidebar-ring: rgba(139, 92, 246, 0.45);
+  --sidebar-primary-foreground: #16202f;
+  --sidebar-accent: #223047;
+  --sidebar-accent-foreground: #f1f5f9;
+  --sidebar-border: #2a3950;
+  --sidebar-ring: rgba(73, 197, 192, 0.5);
 
-  /* RazorShield tokens */
-  --surface-0: #05070b;
-  --surface-1: #0a0e15;
-  --surface-2: #0f141e;
-  --surface-3: #161d2a;
-  --line: rgba(148, 163, 184, 0.11);
-  --line-strong: rgba(148, 163, 184, 0.22);
+  /* RazorShield tokens — slate/graphite ladder, visible borders */
+  --surface-0: #111827;
+  --surface-1: #172233;
+  --surface-2: #1e293b;
+  --surface-3: #273549;
+  --line: #2a3950;
+  --line-strong: #3a4a5f;
 
-  --risk-low: #34d399;
+  --risk-low: #4ade80;
   --risk-medium: #fbbf24;
   --risk-high: #fb7185;
   --risk-critical: #f87171;
   --intel: #a78bfa;
   --intel-soft: #7c8cf8;
+  /* teal/cyan — live & positive accents */
+  --live: #49c5c0;
+  /* blue — informational accents */
+  --info: #60a5fa;
 }
 
 .dark {
-  --background: #05070b;
-  --foreground: #e7ecf4;
-  --card: #0a0e15;
-  --card-foreground: #e7ecf4;
-  --popover: #0d1219;
-  --popover-foreground: #e7ecf4;
-  --primary: #e7ecf4;
-  --primary-foreground: #0a0d13;
-  --secondary: #141a26;
-  --secondary-foreground: #e7ecf4;
-  --muted: #12172280;
-  --muted-foreground: #8b95a9;
-  --accent: #151c2a;
-  --accent-foreground: #e7ecf4;
+  --background: #111827;
+  --foreground: #f1f5f9;
+  --card: #1e293b;
+  --card-foreground: #f1f5f9;
+  --popover: #1b2537;
+  --popover-foreground: #f1f5f9;
+  --primary: #f1f5f9;
+  --primary-foreground: #16202f;
+  --secondary: #223047;
+  --secondary-foreground: #f1f5f9;
+  --muted: #1c283e;
+  --muted-foreground: #a8b6c8;
+  --accent: #24334c;
+  --accent-foreground: #f1f5f9;
   --destructive: #ef4444;
-  --border: rgba(148, 163, 184, 0.11);
-  --input: rgba(148, 163, 184, 0.14);
-  --ring: rgba(139, 92, 246, 0.45);
-  --sidebar: #05070b;
-  --sidebar-foreground: #e7ecf4;
+  --border: #2e3e57;
+  --input: #33455f;
+  --ring: rgba(73, 197, 192, 0.5);
+  --sidebar: #141d2e;
+  --sidebar-foreground: #f1f5f9;
   --sidebar-primary: #a78bfa;
-  --sidebar-primary-foreground: #0a0d13;
-  --sidebar-accent: #121826;
-  --sidebar-accent-foreground: #e7ecf4;
-  --sidebar-border: rgba(148, 163, 184, 0.1);
-  --sidebar-ring: rgba(139, 92, 246, 0.45);
+  --sidebar-primary-foreground: #16202f;
+  --sidebar-accent: #223047;
+  --sidebar-accent-foreground: #f1f5f9;
+  --sidebar-border: #2a3950;
+  --sidebar-ring: rgba(73, 197, 192, 0.5);
 }
 
 @layer base {
@@ -241,24 +249,24 @@
   }
   .glow-intel {
     box-shadow:
-      0 0 0 1px rgba(167, 139, 250, 0.2),
-      0 0 36px -8px rgba(139, 92, 246, 0.3);
+      0 0 0 1px rgba(167, 139, 250, 0.16),
+      0 0 28px -12px rgba(139, 92, 246, 0.22);
   }
   .glow-low {
     box-shadow:
-      0 0 0 1px rgba(52, 211, 153, 0.16),
-      0 0 24px -8px rgba(52, 211, 153, 0.2);
+      0 0 0 1px rgba(74, 222, 128, 0.14),
+      0 0 20px -10px rgba(74, 222, 128, 0.18);
   }
 
   .text-glow-critical {
-    text-shadow: 0 0 28px rgba(248, 113, 113, 0.45);
+    text-shadow: 0 0 22px rgba(248, 113, 113, 0.3);
   }
 
   /* investigation spotlight: dim everything around the case file */
   .spotlight-backdrop {
     background:
-      radial-gradient(ellipse 120% 90% at 50% -10%, rgba(139, 92, 246, 0.07), transparent 55%),
-      radial-gradient(ellipse 100% 70% at 50% 45%, rgba(5, 7, 11, 0) 30%, rgba(5, 7, 11, 0.72) 100%);
+      radial-gradient(ellipse 120% 90% at 50% -10%, rgba(139, 92, 246, 0.05), transparent 55%),
+      radial-gradient(ellipse 100% 70% at 50% 45%, rgba(17, 24, 39, 0) 30%, rgba(10, 15, 26, 0.7) 100%);
   }
 
   .scanline::after {
@@ -269,13 +277,13 @@
     background: linear-gradient(
       to bottom,
       transparent 0%,
-      rgba(167, 139, 250, 0.05) 48%,
-      rgba(167, 139, 250, 0.09) 50%,
-      rgba(167, 139, 250, 0.05) 52%,
+      rgba(167, 139, 250, 0.025) 48%,
+      rgba(167, 139, 250, 0.045) 50%,
+      rgba(167, 139, 250, 0.025) 52%,
       transparent 100%
     );
     background-size: 100% 220%;
-    animation: scan 5.5s linear infinite;
+    animation: scan 7.5s linear infinite;
   }
 
   @keyframes scan {

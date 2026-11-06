@@ -13,11 +13,14 @@
  */
 
 import { NextResponse } from "next/server";
+
 import {
   investigateCase,
   type AgentCaseContext,
 } from "@/lib/agent/investigator";
-import { llmConfigured } from "@/lib/agent/llm";
+import { llmConfigured, resolveLlmConfig } from "@/lib/agent/llm";
+import { db } from "@/lib/db";
+import { writeAudit } from "@/lib/server/ledger";
 
 export const runtime = "nodejs";
 
@@ -98,12 +101,42 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, reason: "Request body is not valid JSON" }, { status: 400 });
   }
 
-  const ctx = sanitizeContext((body as Record<string, unknown> | null)?.context);
+  const raw = (body as Record<string, unknown> | null)?.context;
+  const ctx = sanitizeContext(raw);
   if (!ctx) {
     return NextResponse.json({ ok: false, reason: "Missing or malformed case context" }, { status: 400 });
   }
 
+  /* DB-backed case when the transaction exists in the ledger — evidence is
+   * loaded server-side instead of trusting the client copy. */
+  const ledgerRow = await db.transaction.findUnique({
+    where: { id: ctx.transaction.id },
+    include: { investigation: true },
+  });
+
+  const started = Date.now();
+
   if (!llmConfigured()) {
+    if (ledgerRow) {
+      await persistInvestigation(ledgerRow.id, {
+        mode: "heuristic",
+        provider: null,
+        modelId: null,
+        riskAssessment: "Heuristic mode — no LLM configured. The rules engine's signals are the analysis; the recommendation mirrors the engine verdict.",
+        recommendedAction: verdictFromLevel(ledgerRow.riskLevel),
+        confidence: null,
+        fallbackReason: "No LLM configured",
+        latencyMs: Date.now() - started,
+      });
+      await writeAudit({
+        actor: "SYSTEM",
+        action: "INVESTIGATION_COMPLETED",
+        entityType: "Transaction",
+        entityId: ledgerRow.id,
+        detail: { mode: "heuristic", reason: "no-llm" },
+        transactionId: ledgerRow.id,
+      });
+    }
     return NextResponse.json(
       { ok: false, reason: "LLM not configured — heuristic engine will handle this case" },
       { status: 200 },
@@ -111,12 +144,110 @@ export async function POST(request: Request) {
   }
 
   const verdict = await investigateCase(ctx);
+  const latencyMs = Date.now() - started;
+
   if (!verdict) {
+    if (ledgerRow) {
+      await persistInvestigation(ledgerRow.id, {
+        mode: "heuristic",
+        provider: null,
+        modelId: null,
+        riskAssessment: "The configured LLM failed or returned malformed output — the deterministic heuristic verdict applies.",
+        recommendedAction: verdictFromLevel(ledgerRow.riskLevel),
+        confidence: null,
+        fallbackReason: "LLM unavailable or invalid response",
+        latencyMs,
+      });
+      await writeAudit({
+        actor: "AI ENGINE",
+        action: "INVESTIGATION_COMPLETED",
+        entityType: "Transaction",
+        entityId: ledgerRow.id,
+        detail: { mode: "heuristic", reason: "llm-fallback", latencyMs },
+        transactionId: ledgerRow.id,
+      });
+    }
     return NextResponse.json(
       { ok: false, reason: "Agent did not return a valid verdict — falling back to heuristics" },
       { status: 200 },
     );
   }
 
+  /* Persist the completed LLM investigation with the provider/model that
+   * actually answered. */
+  if (ledgerRow) {
+    await persistInvestigation(ledgerRow.id, {
+      mode: "llm",
+      provider: resolveLlmConfig()?.provider ?? "custom",
+      modelId: verdict.modelLabel || resolveLlmConfig()?.model || null,
+      riskAssessment: verdict.riskAssessment || verdict.riskStory || "",
+      recommendedAction: verdict.recommendedAction,
+      confidence: typeof verdict.confidence === "number" ? verdict.confidence : null,
+      supporting: verdict.evidence ?? [],
+      contradicting: verdict.contradictingEvidence ?? [],
+      uncertainties: verdict.uncertainties ?? [],
+      fallbackReason: null,
+      latencyMs,
+    });
+    await writeAudit({
+      actor: "AI ENGINE",
+      action: "INVESTIGATION_COMPLETED",
+      entityType: "Transaction",
+      entityId: ledgerRow.id,
+      detail: {
+        mode: "llm",
+        provider: resolveLlmConfig()?.provider ?? "custom",
+        model: verdict.modelLabel ?? null,
+        recommendedAction: verdict.recommendedAction,
+        latencyMs,
+      },
+      transactionId: ledgerRow.id,
+    });
+  }
+
   return NextResponse.json({ ok: true, verdict });
+}
+
+/* ------------------------------------------------------------------ */
+/* Persistence helpers                                                 */
+/* ------------------------------------------------------------------ */
+
+function verdictFromLevel(level: string): "ALLOW" | "REVIEW" | "HOLD" | "BLOCK" {
+  return level === "CRITICAL" ? "BLOCK" : level === "HIGH" ? "REVIEW" : level === "MEDIUM" ? "REVIEW" : "ALLOW";
+}
+
+interface PersistInput {
+  mode: "llm" | "heuristic";
+  provider: string | null;
+  modelId: string | null;
+  riskAssessment: string;
+  recommendedAction: string;
+  confidence: number | null;
+  supporting?: string[];
+  contradicting?: string[];
+  uncertainties?: string[];
+  fallbackReason: string | null;
+  latencyMs: number;
+}
+
+async function persistInvestigation(transactionId: string, input: PersistInput) {
+  const data = {
+    mode: input.mode,
+    provider: input.provider,
+    modelId: input.modelId,
+    riskAssessment: input.riskAssessment.slice(0, 6000),
+    recommendedAction: input.recommendedAction,
+    confidence: input.confidence,
+    supportingEvidenceJson: JSON.stringify((input.supporting ?? []).slice(0, 12)),
+    contradictingEvidenceJson: JSON.stringify((input.contradicting ?? []).slice(0, 12)),
+    uncertaintiesJson: JSON.stringify((input.uncertainties ?? []).slice(0, 12)),
+    status: "COMPLETE",
+    fallbackReason: input.fallbackReason,
+    latencyMs: input.latencyMs,
+  };
+  await db.investigation.upsert({
+    where: { transactionId },
+    create: { transactionId, ...data },
+    update: data,
+  });
 }

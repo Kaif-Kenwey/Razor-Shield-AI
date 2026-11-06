@@ -3,36 +3,52 @@
 /**
  * MODEL PERFORMANCE — detection engine evaluation page.
  *
- * Every value on this page is rendered from the MODEL_PERFORMANCE snapshot
- * in the mock data layer — nothing is hardcoded. Because that snapshot is
- * demo data, a prominent disclaimer banner marks the metrics as mock
- * evaluation values for the built-in demo (not live production metrics).
+ * Every value is rendered from GET /api/model/performance via
+ * useModelPerformance(): the deterministic rule engine's recommendations
+ * are compared against the ground-truth labels that actually exist in the
+ * ledger. When fewer labelled rows exist than the minimum, the endpoint
+ * says so and this view renders the honest "not enough labelled data"
+ * state instead of fabricated metrics.
+ *
+ * There is deliberately no ROC-AUC, training date or cost fabrication
+ * here: the engine is a deterministic rules engine, not a trained ML
+ * classifier, and only measured quantities are shown.
  */
 
 import { motion } from "framer-motion";
-import { AlertTriangle } from "lucide-react";
-import { MODEL_PERFORMANCE } from "@/data/mockData";
-import type { ModelPerformance } from "@/types";
-import { formatINR, formatNumber } from "@/lib/format";
+import { AlertTriangle, ArrowRight, RefreshCw } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/shared/States";
+import { useModelPerformance } from "@/hooks/useLedger";
+import { useAppStore } from "@/store/appStore";
+import type { ModelPerformanceResponse } from "@/services/api";
+import { dateTimeShort, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-type ScoreMetricKey = "precision" | "recall" | "f1" | "rocAuc";
+type FullEvaluation = Extract<ModelPerformanceResponse, { insufficientData: false }>;
 
-/** Card + bar definitions only — values come from the snapshot object. */
-const SCORE_METRICS: { key: ScoreMetricKey; label: string; bar: string }[] = [
+/** Card + bar definitions only — values come from the evaluation response. */
+const SCORE_METRICS: { key: "precision" | "recall" | "f1"; label: string; bar: string }[] = [
   { key: "precision", label: "Precision", bar: "bg-intel" },
   { key: "recall", label: "Recall", bar: "bg-intel" },
   { key: "f1", label: "F1 score", bar: "bg-intel/80" },
-  { key: "rocAuc", label: "ROC-AUC", bar: "bg-intel/60" },
 ];
 
-export function ModelPerformanceView() {
-  const mp: ModelPerformance = MODEL_PERFORMANCE;
-  const cm = mp.confusionMatrix;
+function PanelSkeleton() {
+  return (
+    <div className="panel p-5" role="status" aria-label="Loading evaluation">
+      <div className="h-2.5 w-24 rounded bg-slate-500/12 animate-pulse" />
+      <div className="mt-4 h-8 w-32 rounded bg-slate-500/10 animate-pulse" style={{ animationDelay: "120ms" }} />
+      <div className="mt-6 space-y-2">
+        <div className="h-3 w-full rounded bg-slate-500/8 animate-pulse" style={{ animationDelay: "200ms" }} />
+        <div className="h-3 w-4/5 rounded bg-slate-500/8 animate-pulse" style={{ animationDelay: "280ms" }} />
+      </div>
+    </div>
+  );
+}
 
-  /* Misclassification exposure, computed from counts × cost assumptions. */
-  const fpExposure = cm.falsePositives * mp.costAssumptions.falsePositiveCostPerCase;
-  const fnExposure = cm.falseNegatives * mp.costAssumptions.falseNegativeCostPerCase;
+function FullPerformance({ mp }: { mp: FullEvaluation }) {
+  const cm = mp.confusionMatrix;
 
   const matrixCells = [
     {
@@ -41,7 +57,7 @@ export function ModelPerformanceView() {
       count: cm.truePositives,
       bg: "bg-risk-low/8",
       numTone: "text-risk-low",
-      desc: "correctly blocked fraud",
+      desc: "correctly flagged fraud (score ≥ threshold, label = fraud)",
     },
     {
       abbr: "FP",
@@ -57,7 +73,7 @@ export function ModelPerformanceView() {
       count: cm.falseNegatives,
       bg: "bg-risk-critical/10",
       numTone: "text-risk-critical",
-      desc: "fraud missed — direct loss",
+      desc: "fraud scored below threshold — direct loss",
     },
     {
       abbr: "TN",
@@ -70,54 +86,34 @@ export function ModelPerformanceView() {
   ];
 
   const modelCardRows: { label: string; value: string; note?: boolean }[] = [
-    { label: "Model version", value: mp.modelVersion },
-    { label: "Trained", value: mp.trainedAt },
-    { label: "Training dataset", value: mp.trainingDataset },
-    { label: "Evaluation dataset", value: mp.evaluationDataset },
+    { label: "Engine version", value: mp.modelVersion },
+    { label: "Engine kind", value: mp.engineKind },
+    { label: "Evaluated", value: dateTimeShort(mp.evaluatedAt) },
+    { label: "Labelled rows", value: `${formatNumber(mp.labeledCount)} of ${formatNumber(mp.totalTransactions)} stored` },
     { label: "Decision threshold", value: `score ≥ ${mp.threshold}` },
     { label: "Note", value: mp.note, note: true },
   ];
 
   return (
-    <div className="mx-auto max-w-[1200px] px-4 py-6 lg:px-6">
-      {/* Header */}
-      <motion.header
+    <>
+      {/* Honest disclaimer — deterministic engine, measured on real labelled rows */}
+      <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0, duration: 0.35, ease: "easeOut" }}
-        className="mb-6 flex flex-wrap items-end justify-between gap-4"
+        transition={{ delay: 0.06, duration: 0.35, ease: "easeOut" }}
+        role="note"
+        className="mb-6 flex items-center gap-2.5 rounded-sm border border-risk-medium/30 bg-risk-medium/8 px-4 py-2.5"
       >
-        <div>
-          <p className="micro mb-1.5 text-slate-500">Detection engine</p>
-          <h1 className="text-xl font-semibold tracking-tight text-slate-50 sm:text-2xl">
-            Detection benchmark
-          </h1>
-        </div>
-        <span className="micro-11 rounded-sm border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-amber-300">
-          DEMO ENGINE BENCHMARK — not production ML performance
-        </span>
-      </motion.header>
-
-      {/* Demo disclaimer — values are mock evaluation data, never presented as live */}
-      {mp.isDemoSnapshot && (
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.06, duration: 0.35, ease: "easeOut" }}
-          role="note"
-          className="mb-6 flex items-center gap-2.5 rounded-sm border border-risk-medium/30 bg-risk-medium/8 px-4 py-2.5"
-        >
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-risk-medium" aria-hidden />
-          <p className="text-[12px] text-risk-medium/90">
-            Demo snapshot — these are mock evaluation values for demonstration, not live
-            production metrics. Replace via{" "}
-            <span className="font-mono text-[11px] tracking-tight">GET /model/performance</span>.
-          </p>
-        </motion.div>
-      )}
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-risk-medium" aria-hidden />
+        <p className="text-[12px] text-risk-medium/90">
+          Deterministic rule engine — these rates are measured on the labelled rows currently stored
+          in the ledger, not a trained ML classifier. Thresholded recommendation (score ≥{" "}
+          {mp.threshold}) vs ground-truth labels.
+        </p>
+      </motion.div>
 
       {/* Score metrics */}
-      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4" aria-label="Model score metrics">
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-3" aria-label="Engine score metrics">
         {SCORE_METRICS.map((m, i) => {
           const value = mp[m.key];
           return (
@@ -145,7 +141,7 @@ export function ModelPerformanceView() {
         })}
       </div>
 
-      {/* Confusion matrix + cost of errors */}
+      {/* Confusion matrix */}
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <motion.section
           initial={{ opacity: 0, y: 10 }}
@@ -174,52 +170,48 @@ export function ModelPerformanceView() {
               ))}
             </div>
             <p className="num mt-3 text-[11.5px] text-slate-500">
-              Evaluated: {formatNumber(cm.totalEvaluated)} transactions · decision threshold: score ≥{" "}
-              {mp.threshold}
+              Evaluated: {formatNumber(cm.totalEvaluated)} labelled transactions · decision threshold:
+              score ≥ {mp.threshold}
             </p>
           </div>
         </motion.section>
 
+        {/* Evaluation basis — what was actually measured, nothing invented */}
         <motion.section
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.42, duration: 0.35, ease: "easeOut" }}
           className="panel overflow-hidden"
-          aria-label="Cost of errors"
+          aria-label="Evaluation basis"
         >
           <div className="border-b border-line px-4 py-3">
-            <h2 className="micro-11 font-semibold text-slate-200">Cost of errors</h2>
+            <h2 className="micro-11 font-semibold text-slate-200">Evaluation basis</h2>
           </div>
-          <div className="p-4">
-            <div className="space-y-4">
-              <div>
-                <p className="micro text-slate-500">False positive cost</p>
-                <p className="mt-1.5 flex items-baseline gap-1.5">
-                  <span className="num text-[22px] font-semibold text-risk-medium">
-                    {formatINR(mp.costAssumptions.falsePositiveCostPerCase)}
-                  </span>
-                  <span className="text-[11.5px] text-slate-500">per case</span>
-                </p>
-                <p className="mt-1 text-[11.5px] text-slate-500">
-                  Average manual-review operations cost per wrongly flagged legitimate transaction.
-                </p>
-              </div>
-              <div>
-                <p className="micro text-slate-500">False negative cost</p>
-                <p className="mt-1.5 flex items-baseline gap-1.5">
-                  <span className="num text-[22px] font-semibold text-risk-critical">
-                    {formatINR(mp.costAssumptions.falseNegativeCostPerCase)}
-                  </span>
-                  <span className="text-[11.5px] text-slate-500">per case</span>
-                </p>
-                <p className="mt-1 text-[11.5px] text-slate-500">
-                  Average fraud loss per missed fraudulent transaction.
-                </p>
-              </div>
+          <div className="space-y-4 p-4">
+            <div>
+              <p className="micro text-slate-500">Labelled coverage</p>
+              <p className="num mt-1.5 text-[22px] font-semibold text-slate-100">
+                {formatNumber(mp.labeledCount)}
+                <span className="text-[13px] font-normal text-slate-500">
+                  {" "}
+                  / {formatNumber(mp.totalTransactions)} stored transactions
+                </span>
+              </p>
+              <p className="mt-1 text-[11.5px] text-slate-500">
+                Only rows with a ground-truth label participate. Unlabelled payments are excluded
+                rather than guessed.
+              </p>
             </div>
-            <p className="num mt-4 border-t border-line pt-3 text-[11px] text-slate-500">
-              Estimated misclassification exposure: FP {formatINR(fpExposure)} · FN{" "}
-              {formatINR(fnExposure)} per evaluation window
+            <div>
+              <p className="micro text-slate-500">Method</p>
+              <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-300">
+                The deterministic rules engine scores each labelled row; its recommendation at the
+                current threshold is compared with the stored label to derive the rates above.
+              </p>
+            </div>
+            <p className="num border-t border-line pt-3 text-[11px] text-slate-500">
+              Cost-of-error figures are intentionally omitted — no verified cost model exists in the
+              ledger yet.
             </p>
           </div>
         </motion.section>
@@ -255,6 +247,90 @@ export function ModelPerformanceView() {
           ))}
         </dl>
       </motion.section>
+    </>
+  );
+}
+
+export function ModelPerformanceView() {
+  const navigate = useAppStore((s) => s.navigate);
+  const { data: mp, isLoading, isError, refetch } = useModelPerformance();
+
+  return (
+    <div className="mx-auto max-w-[1200px] px-4 py-6 lg:px-6">
+      {/* Header */}
+      <motion.header
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0, duration: 0.35, ease: "easeOut" }}
+        className="mb-6 flex flex-wrap items-end justify-between gap-4"
+      >
+        <div>
+          <p className="micro mb-1.5 text-slate-500">Detection engine</p>
+          <h1 className="text-xl font-semibold tracking-tight text-slate-50 sm:text-2xl">
+            Detection benchmark
+          </h1>
+        </div>
+        <span className="micro-11 rounded-sm border border-line bg-surface-1 px-2 py-1 text-slate-400">
+          deterministic rules · not ML-trained
+        </span>
+      </motion.header>
+
+      {isLoading ? (
+        <div className="grid gap-4 lg:grid-cols-2" aria-label="Loading detection benchmark">
+          <PanelSkeleton />
+          <PanelSkeleton />
+        </div>
+      ) : isError || !mp ? (
+        <section className="panel overflow-hidden" aria-label="Evaluation unavailable">
+          <EmptyState
+            icon={<AlertTriangle className="h-5 w-5 text-risk-medium" aria-hidden />}
+            title="Evaluation unavailable"
+            body="The performance endpoint could not be reached, so no benchmark values are shown rather than stale or invented numbers."
+            action={
+              <Button
+                variant="outline"
+                onClick={() => void refetch()}
+                className="gap-2 border-line bg-surface-2 hover:bg-surface-3"
+              >
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden /> Retry
+              </Button>
+            }
+          />
+        </section>
+      ) : mp.insufficientData ? (
+        /* Honest insufficient-data state — the endpoint refuses to fabricate rates */
+        <motion.section
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.06, duration: 0.35, ease: "easeOut" }}
+          className="panel overflow-hidden"
+          aria-label="Not enough labelled data"
+        >
+          <div className="flex flex-col items-center px-6 py-14 text-center">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-line bg-surface-2 text-slate-400">
+              <AlertTriangle className="h-5 w-5 text-risk-medium" aria-hidden />
+            </div>
+            <p className="text-sm font-medium text-slate-200">Not enough labelled data</p>
+            <p className="num mt-1.5 text-[12.5px] text-slate-500">
+              {formatNumber(mp.labeledCount)} labelled row{mp.labeledCount === 1 ? "" : "s"} in the
+              ledger · {formatNumber(mp.minRequired)} required to compute meaningful rates
+              {mp.totalTransactions > mp.labeledCount
+                ? ` · ${formatNumber(mp.totalTransactions - mp.labeledCount)} stored rows are unlabelled`
+                : ""}
+            </p>
+            <p className="mt-2 max-w-md text-[13px] leading-relaxed text-slate-500">{mp.note}</p>
+            <Button
+              onClick={() => navigate("datastudio")}
+              className="mt-6 gap-2 border border-line bg-surface-1 text-[13px] font-medium text-slate-300 hover:bg-surface-2 hover:text-slate-100"
+            >
+              Import a labelled dataset
+              <ArrowRight className="h-4 w-4" aria-hidden />
+            </Button>
+          </div>
+        </motion.section>
+      ) : (
+        <FullPerformance mp={mp} />
+      )}
     </div>
   );
 }

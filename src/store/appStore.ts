@@ -280,8 +280,19 @@ export const useAppStore = create<AppState>()(
   setPhase: (txnId, phase) =>
     set((s) => ({ phases: { ...s.phases, [txnId]: phase } })),
 
-  resolveAction: (txnId, action, note) =>
-    set((s) => ({
+  resolveAction: (txnId, action, note) => {
+    /* Persist the decision server-side first-class: the PATCH audited
+     * route records it in the SQLite audit trail. Fire-and-forget — the
+     * UI stays optimistic, and polling reconciles when the server row
+     * catches up (decided rows keep local status in the merge). */
+    void fetch(`/api/transactions/${txnId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: action, note, analystId: useAppStore.getState().signedInAnalystId }),
+    }).catch(() => {
+      /* offline — the decision stays local and syncs on next explicit action */
+    });
+    return set((s) => ({
       decisions: {
         ...s.decisions,
         [txnId]: { action, note, at: new Date().toISOString(), analystId: s.signedInAnalystId },
@@ -309,7 +320,8 @@ export const useAppStore = create<AppState>()(
             }
           : t,
       ),
-    })),
+    }));
+  },
 
   markNotificationsRead: () => set({ unreadNotifications: 0 }),
 

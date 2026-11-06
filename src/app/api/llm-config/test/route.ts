@@ -8,7 +8,12 @@
  */
 
 import { NextResponse } from "next/server";
-import { resolveLlmConfig, type LlmConfig } from "@/lib/agent/llm";
+import {
+  AUTO_FREE_ROUTING,
+  resolveAutoFreeModelForProbe,
+  resolveLlmConfig,
+  type LlmConfig,
+} from "@/lib/agent/llm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +30,17 @@ async function probe(cfg: LlmConfig): Promise<ProbeResult> {
       max_tokens: 5,
       temperature: 0,
     };
-    if (cfg.model) body.model = cfg.model;
+    let effectiveModel = cfg.model;
+    /* Automatic free routing resolves to a concrete $0 model so the probe
+     * tests what investigations will actually call. */
+    if (cfg.routing === AUTO_FREE_ROUTING || cfg.model === AUTO_FREE_ROUTING) {
+      const resolved = await resolveAutoFreeModelForProbe(cfg);
+      if (!resolved) {
+        return { ok: false, error: "Automatic free routing found no zero-cost model in the catalogue right now" };
+      }
+      effectiveModel = resolved;
+    }
+    if (effectiveModel) body.model = effectiveModel;
 
     const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
       method: "POST",
@@ -54,7 +69,7 @@ async function probe(cfg: LlmConfig): Promise<ProbeResult> {
     const model =
       typeof (data as { model?: unknown })?.model === "string"
         ? (data as { model: string }).model
-        : cfg.model;
+        : effectiveModel;
     if (typeof content !== "string" || !content.trim()) {
       return { ok: false, error: "Endpoint replied but returned an empty completion" };
     }
@@ -96,6 +111,7 @@ export async function POST(request: Request) {
       apiKey: providedKey,
       model: typeof b.model === "string" ? b.model.trim() : "",
       extraHeaders,
+      routing: typeof b.routing === "string" ? b.routing.trim() : undefined,
     };
   } else {
     cfg = resolveLlmConfig();

@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
+import { Providers } from "@/components/providers/Providers";
 
 /* Type system for the command center: Space Grotesk carries headings and
  * the wordmark (technical without being sci-fi), IBM Plex Sans is the
@@ -44,7 +45,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#05070b",
+  themeColor: "#111827",
 };
 
 export default function RootLayout({
@@ -57,7 +58,7 @@ export default function RootLayout({
       <body
         className={`${spaceGrotesk.variable} ${plexSans.variable} ${plexMono.variable} antialiased bg-surface-0 text-foreground`}
       >
-        {children}
+        <Providers>{children}</Providers>
         <Toaster />
       </body>
     </html>
