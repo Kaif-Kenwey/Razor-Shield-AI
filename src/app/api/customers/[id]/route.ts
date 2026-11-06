@@ -1,7 +1,12 @@
 /**
  * /api/customers/:id — one customer profile, fully derived from the
- * stored ledger: history, devices, locations, method mix and rolling
- * statistics. Includes the recent transaction list for the timeline.
+ * stored ledger.
+ *
+ * Lifetime statistics (count, average, max, flagged counts, device and
+ * location discovery) come from SQL aggregates over the WHOLE history —
+ * never from a truncated sample presented as lifetime truth (review
+ * fix). Only the DISPLAYED history is limited: a 40-row chart sample
+ * plus the 25 most recent transactions for the timeline.
  */
 
 import { NextResponse } from "next/server";
@@ -13,67 +18,110 @@ export const dynamic = "force-dynamic";
 
 type RouteCtx = { params: Promise<{ id: string }> };
 
+const OPEN_STATUSES = ["INVESTIGATING", "UNDER_REVIEW"];
+
 export async function GET(_request: Request, ctx: RouteCtx) {
   const { id } = await ctx.params;
 
   const customer = await db.customer.findUnique({ where: { id } });
-  const txns = await db.transaction.findMany({
-    where: { customerId: id },
-    orderBy: { timestamp: "desc" },
-    take: 200,
-    include: { investigation: true },
-  });
 
-  if (!customer && txns.length === 0) {
+  /* Lifetime aggregates — bounded result sets, never full-table loads. */
+  const [lifeAgg, flaggedAgg, openAgg, devices, locations, methods, firstRow] = await Promise.all([
+    db.transaction.aggregate({
+      where: { customerId: id },
+      _count: { _all: true },
+      _avg: { amount: true, riskScore: true },
+      _max: { amount: true },
+    }),
+    db.transaction.count({ where: { customerId: id, riskLevel: { in: ["HIGH", "CRITICAL"] } } }),
+    db.transaction.count({ where: { customerId: id, status: { in: OPEN_STATUSES } } }),
+    db.transaction.findMany({
+      where: { customerId: id, device: { not: "" } },
+      select: { device: true },
+      distinct: ["device"],
+      take: 20,
+    }),
+    db.transaction.findMany({
+      where: { customerId: id, location: { not: "" } },
+      select: { location: true },
+      distinct: ["location"],
+      take: 20,
+    }),
+    db.transaction.groupBy({
+      by: ["paymentMethod"],
+      where: { customerId: id },
+      _count: { _all: true },
+    }),
+    db.transaction.findFirst({
+      where: { customerId: id },
+      orderBy: { timestamp: "asc" },
+      select: { timestamp: true, customerName: true },
+    }),
+  ]);
+
+  if (!customer && lifeAgg._count._all === 0) {
     return jsonError("Customer not found", 404);
   }
 
-  const amounts = txns.map((t) => t.amount).sort((a, b) => a - b);
-  const median = amounts.length
-    ? amounts.length % 2
-      ? amounts[(amounts.length - 1) / 2]
-      : (amounts[amounts.length / 2 - 1] + amounts[amounts.length / 2]) / 2
-    : 0;
-  const deviceCounts = new Map<string, number>();
-  const locationCounts = new Map<string, number>();
-  const methodCounts = new Map<string, number>();
-  for (const t of txns) {
-    if (t.device) deviceCounts.set(t.device, (deviceCounts.get(t.device) ?? 0) + 1);
-    if (t.location) locationCounts.set(t.location, (locationCounts.get(t.location) ?? 0) + 1);
-    if (t.paymentMethod) methodCounts.set(t.paymentMethod, (methodCounts.get(t.paymentMethod) ?? 0) + 1);
-  }
-  const top = (m: Map<string, number>) =>
-    [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+  /* Displayed history only — chart sample (40) + recent list (25). */
+  const [chartRows, recentRows] = await Promise.all([
+    db.transaction.findMany({
+      where: { customerId: id },
+      orderBy: { timestamp: "desc" },
+      take: 40,
+      select: { timestamp: true, amount: true, riskScore: true, riskLevel: true, id: true },
+    }),
+    db.transaction.findMany({
+      where: { customerId: id },
+      orderBy: { timestamp: "desc" },
+      take: 25,
+      include: { investigation: true },
+    }),
+  ]);
 
-  const flagged = txns.filter((t) => t.riskLevel === "HIGH" || t.riskLevel === "CRITICAL");
+  /* Median over a recent tail sample — labelled as such in the UI. */
+  const tail = chartRows.map((t) => t.amount).sort((a, b) => a - b);
+  const median = tail.length
+    ? tail.length % 2
+      ? tail[(tail.length - 1) / 2]
+      : (tail[tail.length / 2 - 1] + tail[tail.length / 2]) / 2
+    : 0;
+
+  const usualDevice = devices[0]?.device ?? "";
+  const usualLocation = locations[0]?.location ?? "";
+  const usualMethod =
+    [...methods].sort((a, b) => b._count._all - a._count._all)[0]?.paymentMethod ?? "";
+
+  const txCount = lifeAgg._count._all;
+  const lastSeen = chartRows[0]?.timestamp.toISOString() ?? null;
 
   return NextResponse.json({
     ok: true,
     customer: {
       id,
-      name: customer?.name || txns[0]?.customerName || id,
+      name: customer?.name || recentRows[0]?.customerName || firstRow?.customerName || id,
       kycTier: customer?.kycTier ?? "MIN KYC",
       riskProfile: customer?.riskProfile ?? "normal",
       priorIncidents: customer?.priorIncidents ?? 0,
-      accountCreated: customer?.createdAt.toISOString() ?? txns[txns.length - 1]?.timestamp.toISOString() ?? null,
-      firstSeen: txns[txns.length - 1]?.timestamp.toISOString() ?? null,
-      lastSeen: txns[0]?.timestamp.toISOString() ?? null,
-      transactionCount: txns.length,
-      avgTransaction: amounts.length ? Math.round(amounts.reduce((s, a) => s + a, 0) / amounts.length) : 0,
+      accountCreated: customer?.createdAt.toISOString() ?? firstRow?.timestamp.toISOString() ?? null,
+      firstSeen: firstRow?.timestamp.toISOString() ?? null,
+      lastSeen,
+      transactionCount: txCount,
+      avgTransaction: Math.round(lifeAgg._avg.amount ?? 0),
       medianTransaction: Math.round(median),
-      maxTransaction: amounts.length ? Math.round(amounts[amounts.length - 1]) : 0,
-      avgRiskScore: txns.length ? Math.round(txns.reduce((s, t) => s + t.riskScore, 0) / txns.length) : 0,
-      flaggedCount: flagged.length,
-      flaggedRate: txns.length ? flagged.length / txns.length : 0,
-      openCases: txns.filter((t) => ["INVESTIGATING", "UNDER_REVIEW"].includes(t.status)).length,
-      knownDevices: [...deviceCounts.keys()],
-      usualLocations: [...locationCounts.keys()],
-      usualDevice: top(deviceCounts),
-      usualLocation: top(locationCounts),
-      usualMethod: top(methodCounts),
-      methodMix: Object.fromEntries(methodCounts),
+      maxTransaction: Math.round(lifeAgg._max.amount ?? 0),
+      avgRiskScore: Math.round(lifeAgg._avg.riskScore ?? 0),
+      flaggedCount: flaggedAgg,
+      flaggedRate: txCount ? flaggedAgg / txCount : 0,
+      openCases: openAgg,
+      knownDevices: devices.map((d) => d.device),
+      usualLocations: locations.map((l) => l.location),
+      usualDevice,
+      usualLocation,
+      usualMethod,
+      methodMix: Object.fromEntries(methods.map((m) => [m.paymentMethod || "Unknown", m._count._all])),
     },
-    history: txns
+    history: chartRows
       .slice()
       .reverse()
       .map((t) => ({
@@ -83,6 +131,6 @@ export async function GET(_request: Request, ctx: RouteCtx) {
         flagged: t.riskLevel === "HIGH" || t.riskLevel === "CRITICAL",
         txnId: t.id,
       })),
-    transactions: txns.slice(0, 25).map(toUiTransaction),
+    transactions: recentRows.map(toUiTransaction),
   });
 }

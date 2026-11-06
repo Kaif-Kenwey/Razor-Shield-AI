@@ -1,9 +1,13 @@
 /**
  * /api/customers — customer directory with derived statistics.
  *
- * GET — paginated profiles calculated live from the ledger: ticket
- *       averages/medians, usual device and location, incident counts and
- *       risk roll-ups. Nothing about a customer is stored twice.
+ * GET — paginated profiles calculated live from the ledger. Lifetime
+ *       numbers (transaction count, averages, flagged counts, open
+ *       cases, last-seen) come from bounded SQL groupBy/aggregate
+ *       queries — NOT from loading every transaction per customer
+ *       (review fix). Only a small recent sample per displayed customer
+ *       (last 25 rows) feeds the "usual device/location/method" modes
+ *       and the median, so memory stays flat as the ledger grows.
  */
 
 import { NextResponse } from "next/server";
@@ -12,6 +16,8 @@ import { jsonError, paginationMeta, paginationSchema } from "@/lib/server/ledger
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const OPEN_STATUSES = ["INVESTIGATING", "UNDER_REVIEW"];
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -35,24 +41,78 @@ export async function GET(request: Request) {
       orderBy: { updatedAt: "desc" },
       skip: (page - 1) * pageSize,
       take: pageSize,
-      include: {
-        transactions: {
-          orderBy: { timestamp: "desc" },
-          select: { amount: true, riskScore: true, riskLevel: true, device: true, location: true, paymentMethod: true, timestamp: true, status: true },
-        },
-      },
     }),
   ]);
 
+  const ids = customers.map((c) => c.id);
+  const emptyIds = ids.length === 0;
+
+  /* Lifetime statistics straight from SQL — bounded by the page's ids. */
+  const [lifeStats, flaggedStats, openStats, lastSeenStats] = emptyIds
+    ? [[], [], [], []]
+    : await Promise.all([
+        db.transaction.groupBy({
+          by: ["customerId"],
+          where: { customerId: { in: ids } },
+          _count: { _all: true },
+          _avg: { amount: true, riskScore: true },
+        }),
+        db.transaction.groupBy({
+          by: ["customerId"],
+          where: { customerId: { in: ids }, riskLevel: { in: ["HIGH", "CRITICAL"] } },
+          _count: { _all: true },
+        }),
+        db.transaction.groupBy({
+          by: ["customerId"],
+          where: { customerId: { in: ids }, status: { in: OPEN_STATUSES } },
+          _count: { _all: true },
+        }),
+        db.transaction.groupBy({
+          by: ["customerId"],
+          where: { customerId: { in: ids } },
+          _max: { timestamp: true },
+        }),
+      ]);
+
+  /* Small recent sample per displayed customer — usual device/location/
+   * method and median are presentation-level stats over the tail, not
+   * lifetime claims. Bounded: pageSize × 25 rows max. */
+  const samples = emptyIds
+    ? new Map<string, { amount: number; device: string; location: string; paymentMethod: string; timestamp: Date }[]>()
+    : new Map(
+        (
+          await Promise.all(
+            ids.map((id) =>
+              db.transaction.findMany({
+                where: { customerId: id },
+                orderBy: { timestamp: "desc" },
+                take: 25,
+                select: {
+                  amount: true,
+                  device: true,
+                  location: true,
+                  paymentMethod: true,
+                  timestamp: true,
+                },
+              }),
+            ),
+          )
+        ).map((rows, i) => [ids[i], rows]),
+      );
+
+  const life = new Map(lifeStats.map((r) => [r.customerId, r]));
+  const flagged = new Map(flaggedStats.map((r) => [r.customerId, r._count._all]));
+  const open = new Map(openStats.map((r) => [r.customerId, r._count._all]));
+  const seen = new Map(lastSeenStats.map((r) => [r.customerId, r._max.timestamp]));
+
   const profiles = customers.map((c) => {
-    const txns = c.transactions;
+    const txns = samples.get(c.id) ?? [];
     const amounts = txns.map((t) => t.amount).sort((a, b) => a - b);
     const median = amounts.length
       ? amounts.length % 2
         ? amounts[(amounts.length - 1) / 2]
         : (amounts[amounts.length / 2 - 1] + amounts[amounts.length / 2]) / 2
       : 0;
-    const flagged = txns.filter((t) => t.riskLevel === "HIGH" || t.riskLevel === "CRITICAL").length;
     const deviceCounts = new Map<string, number>();
     const locationCounts = new Map<string, number>();
     const methodCounts = new Map<string, number>();
@@ -64,23 +124,27 @@ export async function GET(request: Request) {
     const top = (m: Map<string, number>) =>
       [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
 
+    const stat = life.get(c.id);
+    const txCount = stat?._count._all ?? 0;
+    const flaggedCount = flagged.get(c.id) ?? 0;
+
     return {
       id: c.id,
       name: c.name,
       kycTier: c.kycTier,
       riskProfile: c.riskProfile,
       priorIncidents: c.priorIncidents,
-      transactionCount: txns.length,
-      avgTransaction: amounts.length ? Math.round(amounts.reduce((s, a) => s + a, 0) / amounts.length) : 0,
+      transactionCount: txCount,
+      avgTransaction: Math.round(stat?._avg.amount ?? 0),
       medianTransaction: Math.round(median),
-      flaggedCount: flagged,
-      flaggedRate: txns.length ? flagged / txns.length : 0,
-      avgRiskScore: txns.length ? Math.round(txns.reduce((s, t) => s + t.riskScore, 0) / txns.length) : 0,
+      flaggedCount,
+      flaggedRate: txCount ? flaggedCount / txCount : 0,
+      avgRiskScore: Math.round(stat?._avg.riskScore ?? 0),
       usualDevice: top(deviceCounts),
       usualLocation: top(locationCounts),
       usualMethod: top(methodCounts),
-      lastSeen: txns[0]?.timestamp.toISOString() ?? null,
-      openCases: txns.filter((t) => ["INVESTIGATING", "UNDER_REVIEW"].includes(t.status)).length,
+      lastSeen: seen.get(c.id)?.toISOString() ?? null,
+      openCases: open.get(c.id) ?? 0,
     };
   });
 

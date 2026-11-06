@@ -8,6 +8,12 @@
  * real per-row context — not the batch-file baselines. Duplicates are
  * reported, not silently dropped. dataSource="import" + optional
  * ground-truth labels are preserved for the model-performance endpoint.
+ *
+ * ORDER MATTERS: rows are processed chronologically (unparseable
+ * timestamps last, flagged) and each row's scoring context is cut at its
+ * own timestamp, so a historical import can never score a payment with
+ * history that had not happened yet. The client sends chunks in order
+ * with a progress bar — batches stay small enough to report progress.
  */
 
 import { NextResponse } from "next/server";
@@ -15,6 +21,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { jsonError, writeAudit } from "@/lib/server/ledger";
 import { scoreAndPersistTransaction } from "@/lib/server/scoringService";
+import { clientKey, rateLimit } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +42,9 @@ const rowSchema = z.object({
 const importSchema = z.object({
   datasetName: z.string().trim().max(120).default("Imported dataset"),
   rows: z.array(rowSchema).min(1, "No rows to import").max(2000, "Import up to 2000 rows per run"),
+  /** 1-based chunk index and total — progress reporting for chunked sends. */
+  chunkIndex: z.number().int().min(1).optional(),
+  chunkTotal: z.number().int().min(1).optional(),
 });
 
 /** Normalise any ledger-conflicting id into a free one. */
@@ -49,6 +59,10 @@ async function freeId(base: string): Promise<string> {
 }
 
 export async function POST(request: Request) {
+  const rl = rateLimit(clientKey(request, "ledger-import"), 12, 60_000);
+  if (!rl.allowed) {
+    return jsonError(`Imports are rate limited — retry in ${rl.retryAfterSec}s.`, 429);
+  }
   let body: unknown;
   try {
     body = await request.json();
@@ -60,13 +74,26 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return jsonError(parsed.error.issues[0]?.message ?? "Invalid import payload");
   }
-  const { datasetName, rows } = parsed.data;
+  const { datasetName, rows, chunkIndex, chunkTotal } = parsed.data;
+
+  /* Chronological processing — the scoring service cuts every row's
+   * history at its own timestamp; feeding rows oldest-first guarantees
+   * each payment only ever sees payments that already happened. Rows
+   * with unparseable timestamps score last (already warned). */
+  const ordered = rows
+    .map((row, i) => ({ row, i, ts: row.timestamp ? new Date(row.timestamp).getTime() : NaN }))
+    .sort((a, b) => {
+      const aOk = Number.isNaN(a.ts) ? Infinity : a.ts;
+      const bOk = Number.isNaN(b.ts) ? Infinity : b.ts;
+      return aOk - bOk || a.i - b.i;
+    })
+    .map((r) => r.row);
 
   let imported = 0;
   const duplicates: string[] = [];
   const failed: { txnId: string; error: string }[] = [];
 
-  for (const row of rows) {
+  for (const row of ordered) {
     try {
       const exists = await db.transaction.findUnique({
         where: { id: row.txnId.toUpperCase().startsWith("TXN_") ? row.txnId : `TXN_${row.txnId}` },
@@ -101,7 +128,13 @@ export async function POST(request: Request) {
     action: "DATASET_IMPORTED",
     entityType: "Ledger",
     entityId: datasetName,
-    detail: { imported, duplicates: duplicates.length, failed: failed.length, datasetName },
+    detail: {
+      imported,
+      duplicates: duplicates.length,
+      failed: failed.length,
+      datasetName,
+      ...(chunkIndex && chunkTotal ? { chunk: `${chunkIndex}/${chunkTotal}` } : {}),
+    },
   });
 
   return NextResponse.json({

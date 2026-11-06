@@ -148,7 +148,9 @@ export function SystemView() {
         latencyMs: null,
         records: null,
         detail: health.llm.configured
-          ? `LLM live · ${health.llm.provider ?? "custom"} · ${health.llm.model ?? "endpoint default"}`
+          ? `LLM live · ${health.llm.provider ?? "custom"} · ${health.llm.model ?? "endpoint default"} · ${
+              health.llm.verification === "verified" ? "connection verified" : "saved, not yet verified"
+            }`
           : "Heuristic mode — connect an LLM from the top bar",
       },
       {
@@ -234,9 +236,30 @@ export function SystemView() {
     {
       label: "AI investigator",
       value: llmStatus?.configured
-        ? `LLM live · ${llmStatus.model || llmStatus.baseUrl}${llmStatus.source === "env" ? " (.env)" : ""}`
+        ? `LLM live · ${llmStatus.model || llmStatus.baseUrl}${llmStatus.source === "env" ? " (.env)" : ""}${
+            llmStatus.verification?.state === "verified" ? " · verified" : " · saved, not verified"
+          }`
         : "Heuristic engine — no LLM configured",
       tone: llmStatus?.configured ? "good" : undefined,
+    },
+    {
+      label: "LLM key storage",
+      value: "Encrypted at rest (AES-256-GCM) · server-side only · never returned to the browser",
+      tone: "good",
+    },
+    {
+      label: "Endpoint guard",
+      value: "SSRF filter active — private/link-local/cloud-metadata targets blocked (Ollama localhost excepted)",
+      tone: "good",
+    },
+    {
+      label: "Admin guard",
+      value: health
+        ? health.security.adminGuard === "env"
+          ? "ADMIN_TOKEN required for config writes + destructive routes"
+          : "Open demo mode — set ADMIN_TOKEN to lock admin APIs"
+        : "—",
+      tone: health?.security.adminGuard === "env" ? "good" : undefined,
     },
     { label: "Live streaming", value: demoMode ? (streamPaused ? "Enabled · arrivals paused" : "Enabled (scripted arrivals)") : "Disabled" },
     { label: "Critical alerts", value: soundEnabled ? "Chime on critical arrivals" : "Muted (toast only)" },

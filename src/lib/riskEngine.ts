@@ -482,6 +482,16 @@ export function scoreToLevel(score: number): RiskLevel {
   return "LOW";
 }
 
+/**
+ * The score at/above which a row counts as FLAGGED — the single
+ * definition used everywhere a "detected/flagged" row is counted:
+ * MEDIUM and above (score ≥ 28), which is exactly the band the engine
+ * routes into the review flow (recommendation ≠ ALLOW). Evaluation
+ * dashboards, Dataset Studio and the metrics API all read this constant
+ * so no view can quietly invent its own detection threshold.
+ */
+export const FLAG_THRESHOLD = 28;
+
 export function levelToAction(score: number, level: RiskLevel): RiskAction {
   if (level === "CRITICAL") return "BLOCK";
   if (level === "HIGH") return score >= 60 ? "HOLD" : "REVIEW";

@@ -22,6 +22,7 @@
  */
 
 import { readRuntimeLlmConfig } from "./llmConfigStore";
+import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
 
 export interface LlmConfig {
   baseUrl: string;
@@ -106,6 +107,30 @@ const FREE_MODEL_TTL_MS = 10 * 60 * 1000;
  * when no free model is currently listed — the caller then fails loudly
  * rather than silently spending money.
  */
+/**
+ * Chat-compatibility check from OpenRouter's own architecture metadata:
+ * a model can serve the investigator only when BOTH input and output
+ * modalities include text. Embedding/reranker/image-only models are
+ * excluded even when their pricing is $0 — zero cost does not mean the
+ * endpoint can answer a chat completion.
+ */
+function openRouterChatCompatible(m: {
+  architecture?: { input_modalities?: unknown; output_modalities?: unknown; modality?: unknown };
+}): boolean {
+  const arch = m.architecture ?? {};
+  const inputs = Array.isArray(arch.input_modalities) ? (arch.input_modalities as unknown[]).map(String) : null;
+  const outputs = Array.isArray(arch.output_modalities) ? (arch.output_modalities as unknown[]).map(String) : null;
+  if (inputs && !inputs.includes("text")) return false;
+  if (outputs && !outputs.includes("text")) return false;
+  // Fallback for catalogues that only expose the combined "text->text" form.
+  if (!inputs && !outputs && typeof arch.modality === "string") {
+    const [inSide, outSide] = arch.modality.split("->").map((s) => s.trim());
+    if (outSide && !outSide.includes("text")) return false;
+    if (inSide && !inSide.includes("text") && !inSide.includes("image")) return false;
+  }
+  return true;
+}
+
 async function resolveAutoFreeModel(cfg: LlmConfig): Promise<string | null> {
   if (freeModelCache && Date.now() - freeModelCache.fetchedAt < FREE_MODEL_TTL_MS) {
     return freeModelCache.model;
@@ -120,12 +145,18 @@ async function resolveAutoFreeModel(cfg: LlmConfig): Promise<string | null> {
     });
     clearTimeout(timer);
     if (!res.ok) throw new LlmError(`OpenRouter catalogue responded ${res.status}`, res.status);
-    const data = (await res.json()) as { data?: { id?: unknown; pricing?: { prompt?: unknown; completion?: unknown } }[] };
+    const data = (await res.json()) as {
+      data?: {
+        id?: unknown;
+        pricing?: { prompt?: unknown; completion?: unknown };
+        architecture?: { input_modalities?: unknown; output_modalities?: unknown; modality?: unknown };
+      }[];
+    };
     const models = data?.data ?? [];
     const free = models.find((m) => {
       const prompt = Number.parseFloat(String(m.pricing?.prompt ?? "1"));
       const completion = Number.parseFloat(String(m.pricing?.completion ?? "1"));
-      return typeof m.id === "string" && prompt === 0 && completion === 0;
+      return typeof m.id === "string" && prompt === 0 && completion === 0 && openRouterChatCompatible(m);
     });
     const model = typeof free?.id === "string" ? free.id : null;
     freeModelCache = { model, fetchedAt: Date.now() };
@@ -161,6 +192,17 @@ export async function chatComplete(
 ): Promise<{ content: string; model: string }> {
   const cfg = resolveLlmConfig();
   if (!cfg) throw new LlmError("LLM is not configured (set it in the AI panel or via LLM_BASE_URL / LLM_API_KEY)");
+
+  /* SSRF guard — the endpoint may come from operator config; validate it
+   * before every call. Only the local Ollama provider may target this
+   * machine; env configs need LLM_ALLOW_LOCAL=1 to opt in explicitly. */
+  const allowLocal = cfg.provider === "ollama" || process.env.LLM_ALLOW_LOCAL === "1";
+  try {
+    await assertSafeLlmUrl(cfg.baseUrl, { allowLocal });
+  } catch (err) {
+    const reason = err instanceof UrlGuardError ? err.message : "endpoint failed the safety check";
+    throw new LlmError(`LLM endpoint blocked by the URL guard — ${reason}`);
+  }
 
   /* Automatic free-model routing: resolve the routing id to a concrete
    * zero-cost model from the live catalogue before calling the endpoint. */

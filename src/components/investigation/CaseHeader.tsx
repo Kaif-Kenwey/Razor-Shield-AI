@@ -30,6 +30,7 @@ import { StatusDot } from "@/components/shared/StatusDot";
 import { SlaChip } from "@/components/shared/SlaChip";
 import { useToast } from "@/hooks/use-toast";
 import { useAppStore } from "@/store/appStore";
+import { useRecordAssignment } from "@/hooks/useLedger";
 import { ANALYSTS, customerFor } from "@/data/mockData";
 import { buildCaseFile, buildCaseMarkdown, copyText, downloadCaseFile } from "@/lib/caseFile";
 import { formatINR } from "@/lib/format";
@@ -64,6 +65,7 @@ export function CaseHeader({
   const escalations = useAppStore((s) => s.escalations);
   const assignCase = useAppStore((s) => s.assignCase);
   const acceptCaseHandoff = useAppStore((s) => s.acceptCaseHandoff);
+  const recordAssignment = useRecordAssignment();
   const caseNotes = useAppStore((s) => s.caseNotes[txn.id]);
   const signedInId = useAppStore((s) => s.signedInAnalystId);
   const watched = Boolean(watchlist[txn.id]);
@@ -76,6 +78,23 @@ export function CaseHeader({
   const [acceptMenuOpen, setAcceptMenuOpen] = useState(false);
 
   const resolved = Boolean(investigation?.analystAction);
+
+  /** SERVER-PERSISTED handoff: PATCH /api/transactions/:id first — the
+   * local map only updates when the audited write succeeds. */
+  const persistAssignment = async (analystId: string | null) => {
+    try {
+      await recordAssignment.mutateAsync({ txnId: txn.id, assignee: analystId, analystId: signedInId });
+      assignCase(txn.id, analystId);
+      return true;
+    } catch (err) {
+      toast({
+        title: "Assignment not saved",
+        description: err instanceof Error && err.message ? err.message : "The server rejected the handoff — try again.",
+        variant: "destructive",
+      });
+      return false;
+    }
+  };
 
   /** Claim the handoff: audited, and switches the acting persona to the assignee. */
   const acceptHandoff = () => {
@@ -271,14 +290,16 @@ export function CaseHeader({
                           role="option"
                           aria-selected={selected}
                           onClick={() => {
-                            assignCase(txn.id, selected ? null : a.id);
-                            setAssignOpen(false);
-                            if (!selected) {
-                              toast({
-                                title: `Case assigned to ${a.name}`,
-                                description: `${txn.id} · handoff recorded in the audit trail.`,
-                              });
-                            }
+                            void persistAssignment(selected ? null : a.id).then((ok) => {
+                              if (!ok) return;
+                              setAssignOpen(false);
+                              if (!selected) {
+                                toast({
+                                  title: `Case assigned to ${a.name}`,
+                                  description: `${txn.id} · handoff persisted to the ledger and recorded in the audit trail.`,
+                                });
+                              }
+                            });
                           }}
                           className={cn(
                             "flex w-full items-center gap-2.5 px-3.5 py-2 text-left transition-colors hover:bg-surface-2",
@@ -306,8 +327,9 @@ export function CaseHeader({
                   <div className="border-t border-line px-3.5 py-2">
                     <button
                       onClick={() => {
-                        assignCase(txn.id, null);
-                        setAssignOpen(false);
+                        void persistAssignment(null).then((ok) => {
+                          if (ok) setAssignOpen(false);
+                        });
                       }}
                       className="flex items-center gap-1.5 text-[11px] text-slate-500 transition-colors hover:text-slate-300"
                     >

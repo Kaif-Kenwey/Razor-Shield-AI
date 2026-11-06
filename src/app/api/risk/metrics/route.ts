@@ -2,10 +2,18 @@
  * /api/risk/metrics — every dashboard statistic, computed live from the
  * stored ledger. No fabricated numbers: when the ledger is empty the
  * response says so and the UI renders the empty state.
+ *
+ * Honesty notes (review fixes):
+ *   - `flaggedValue` is the rupee value of rows the engine scored HIGH or
+ *     CRITICAL — flagged for review, NOT confirmed fraud.
+ *   - `resolvedToday` counts rows that reached a resolved status in the
+ *     last 24h, via its own query (it used to read a slice that excluded
+ *     resolved rows entirely and could only ever return 0).
  */
 
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { FLAG_THRESHOLD } from "@/lib/riskEngine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,7 +21,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-  const [total, agg, levelRows, statusRows, methodRows, merchantRows, recent, highRiskCustomers, investigations] =
+  const [total, agg, levelRows, statusRows, methodRows, merchantRows, recent, highRiskCustomers, investigations, resolvedRecently] =
     await Promise.all([
       db.transaction.count(),
       db.transaction.aggregate({ _sum: { amount: true }, _avg: { riskScore: true } }),
@@ -47,11 +55,18 @@ export async function GET() {
         where: { status: { in: ["INVESTIGATING", "UNDER_REVIEW"] } },
         select: { status: true, riskLevel: true, timestamp: true, updatedAt: true },
       }),
+      /* Separate query: resolved rows were NOT part of the open-queue
+       * slice above, so counting them from it always returned 0. */
+      db.transaction.count({
+        where: { status: { in: ["BLOCKED", "ALLOWED", "ON_HOLD"] }, updatedAt: { gte: since } },
+      }),
     ]);
 
   const levelCount = (l: string) => levelRows.find((r) => r.riskLevel === l)?._count._all ?? 0;
   const highRisk = levelCount("HIGH") + levelCount("CRITICAL");
-  const exposure = levelRows
+  /* Honest naming: this is the value the engine FLAGGED (score ≥ 28 →
+   * MEDIUM and above enter the review flow), not confirmed fraud. */
+  const flaggedValue = levelRows
     .filter((r) => r.riskLevel === "HIGH" || r.riskLevel === "CRITICAL")
     .reduce((s, r) => s + (r._sum.amount ?? 0), 0);
 
@@ -73,9 +88,7 @@ export async function GET() {
 
   const openQueue = investigations.filter((t) => t.status === "INVESTIGATING").length;
   const underReview = investigations.filter((t) => t.status === "UNDER_REVIEW").length;
-  const resolvedToday = investigations.filter(
-    (t) => ["BLOCKED", "ALLOWED", "ON_HOLD"].includes(t.status) && t.updatedAt >= since,
-  ).length;
+  const resolvedToday = resolvedRecently;
 
   return NextResponse.json({
     ok: true,
@@ -87,7 +100,10 @@ export async function GET() {
       critical: levelCount("CRITICAL"),
       pendingInvestigations: openQueue + underReview,
       avgRiskScore: Math.round((agg._avg.riskScore ?? 0) * 10) / 10,
-      fraudExposure: Math.round(exposure),
+      /** HIGH+CRITICAL rupee value — flagged for review, not confirmed fraud. */
+      flaggedValue: Math.round(flaggedValue),
+      /** Engine score at/above which a row enters the review flow (MEDIUM). */
+      flaggedThreshold: FLAG_THRESHOLD,
     },
     riskDistribution: (["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const).map((l) => ({
       level: l,
@@ -112,7 +128,8 @@ export async function GET() {
       customerName: r.customerName || r.customerId,
       flaggedCount: r._count._all,
       avgRiskScore: Math.round(r._avg.riskScore ?? 0),
-      exposure: Math.round(r._sum.amount ?? 0),
+      /** Rupee value of this customer's flagged rows — potential exposure. */
+      flaggedValue: Math.round(r._sum.amount ?? 0),
     })),
     queue: {
       investigating: openQueue,

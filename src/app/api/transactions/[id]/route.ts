@@ -2,10 +2,13 @@
  * /api/transactions/:id — one complete ledger record.
  *
  * GET    — the transaction with customer profile, engine signals, stored
- *          investigation (if any) and the persisted audit trail.
- * PATCH  — analyst workflows: status updates and final decisions, both
- *          audited. The analyst decision also closes the stored
- *          investigation when one exists.
+ *          investigation (if any), persisted case notes and the persisted
+ *          audit trail.
+ * PATCH  — analyst workflows: status updates, final decisions, case
+ *          assignments and SLA-breach escalations, all audited and
+ *          persisted to SQLite. The analyst decision also closes the
+ *          stored investigation when one exists — and creates one with
+ *          the decision attached when it does not.
  * DELETE — restricted cleanup: only demo, manual and imported records can
  *          be deleted, the audit trail itself survives (SetNull).
  */
@@ -21,6 +24,7 @@ import {
   toUiTransaction,
   writeAudit,
 } from "@/lib/server/ledger";
+import { checkAdminGuard, clientKey, rateLimit } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -109,7 +113,7 @@ export async function GET(_request: Request, ctx: RouteCtx) {
 }
 
 /* ------------------------------------------------------------------ */
-/* PATCH — status / analyst decision (audited)                         */
+/* PATCH — status / analyst decision / assignment / escalation         */
 /* ------------------------------------------------------------------ */
 
 const patchSchema = z.object({
@@ -119,9 +123,17 @@ const patchSchema = z.object({
   decision: z.enum(["ALLOW", "REVIEW", "HOLD", "BLOCK"]).optional(),
   note: z.string().trim().max(1000).optional(),
   analystId: z.string().trim().max(16).optional(),
+  /** Server-persisted case handoff. null clears the assignment. */
+  assignee: z.string().trim().max(16).nullable().optional(),
+  /** Server-persisted SLA-breach escalation target (analyst roster id). */
+  escalateTo: z.string().trim().max(16).optional(),
 });
 
 export async function PATCH(request: Request, ctx: RouteCtx) {
+  const rl = rateLimit(clientKey(request, "txn-patch"), 60, 60_000);
+  if (!rl.allowed) {
+    return jsonError(`Too many updates — retry in ${rl.retryAfterSec}s.`, 429);
+  }
   const { id } = await ctx.params;
   let body: unknown;
   try {
@@ -132,8 +144,10 @@ export async function PATCH(request: Request, ctx: RouteCtx) {
 
   const parsed = patchSchema.safeParse(body);
   if (!parsed.success) return jsonError(parsed.error.issues[0]?.message ?? "Invalid patch");
-  const { status, decision, note, analystId } = parsed.data;
-  if (!status && !decision) return jsonError("Provide a status or an analyst decision");
+  const { status, decision, note, analystId, assignee, escalateTo } = parsed.data;
+  if (!status && !decision && assignee === undefined && !escalateTo) {
+    return jsonError("Provide a status, a decision, an assignee or an escalation target");
+  }
 
   const existing = await db.transaction.findUnique({
     where: { id },
@@ -152,10 +166,16 @@ export async function PATCH(request: Request, ctx: RouteCtx) {
           ? {
               investigation: {
                 upsert: {
+                  /* Creation path must carry the decision too — a verdict
+                   * recorded BEFORE any AI/heuristic investigation ran
+                   * still persists action, note and resolved timestamp. */
                   create: {
                     mode: "heuristic",
                     riskAssessment: "Analyst decision recorded without a prior investigation.",
                     recommendedAction: decision,
+                    analystAction: decision,
+                    analystNote: note ?? null,
+                    resolvedAt: new Date(),
                   },
                   update: {
                     analystAction: decision,
@@ -166,6 +186,8 @@ export async function PATCH(request: Request, ctx: RouteCtx) {
               },
             }
           : {}),
+        ...(assignee !== undefined ? { assigneeId: assignee } : {}),
+        ...(escalateTo ? { escalatedTo: escalateTo, assigneeId: escalateTo } : {}),
       },
       include: { investigation: true },
     });
@@ -178,6 +200,37 @@ export async function PATCH(request: Request, ctx: RouteCtx) {
           entityType: "Transaction",
           entityId: id,
           detailJson: JSON.stringify({ decision, note: note ?? null, analystId: analystId ?? null }),
+          transactionId: id,
+        },
+      });
+    }
+    if (assignee !== undefined) {
+      await tx.auditEvent.create({
+        data: {
+          actor: "ANALYST",
+          action: assignee ? "CASE_ASSIGNED" : "CASE_UNASSIGNED",
+          entityType: "Transaction",
+          entityId: id,
+          detailJson: JSON.stringify({
+            assignee,
+            byAnalystId: analystId ?? null,
+          }),
+          transactionId: id,
+        },
+      });
+    }
+    if (escalateTo) {
+      await tx.auditEvent.create({
+        data: {
+          actor: "ANALYST",
+          action: "CASE_ESCALATED",
+          entityType: "Transaction",
+          entityId: id,
+          detailJson: JSON.stringify({
+            to: escalateTo,
+            byAnalystId: analystId ?? null,
+            reason: "SLA breach — one-click escalation",
+          }),
           transactionId: id,
         },
       });
@@ -204,7 +257,12 @@ export async function PATCH(request: Request, ctx: RouteCtx) {
 /* DELETE — restricted cleanup, audit preserved                        */
 /* ------------------------------------------------------------------ */
 
-export async function DELETE(_request: Request, ctx: RouteCtx) {
+export async function DELETE(request: Request, ctx: RouteCtx) {
+  /* Destructive operation — guarded when this deployment sets ADMIN_TOKEN. */
+  const guard = checkAdminGuard(request);
+  if (!guard.ok) {
+    return jsonError(guard.message, 401, { adminRequired: true });
+  }
   const { id } = await ctx.params;
   const existing = await db.transaction.findUnique({ where: { id } });
   if (!existing) return jsonError("Transaction not found", 404);

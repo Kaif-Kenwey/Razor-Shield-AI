@@ -4,14 +4,17 @@
  * ANALYST NOTEBOOK — an append-only per-case notebook.
  * The analyst voice between the AI's conclusion and the final bounded
  * action: call notes, customer confirmations, escalations. Entries are
- * stamped with the signed-in analyst identity and never editable —
- * the notebook reads like the audit trail it feeds.
+ * SERVER-PERSISTED (CaseNote table, audited as NOTE_ADDED) and stamped
+ * with the signed-in analyst identity — the notebook is part of the case
+ * record, so it survives reloads, other browsers and demo-data clears.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { CornerDownLeft, NotebookPen, Zap } from "lucide-react";
+import { CornerDownLeft, Loader2, NotebookPen, Zap } from "lucide-react";
 import { useAppStore, type CaseNote } from "@/store/appStore";
+import { useAddCaseNote, useCaseNotes } from "@/hooks/useLedger";
+import { useToast } from "@/hooks/use-toast";
 import { ANALYSTS } from "@/data/mockData";
 import { isTypingTarget } from "@/components/layout/KeyboardShortcuts";
 import { relativeTime, timeHHMMSS } from "@/lib/format";
@@ -29,17 +32,31 @@ const QUICK_CHIPS: { label: string; text: string }[] = [
 ];
 
 export function AnalystNotes({ txnId }: { txnId: string }) {
-  const notes = useAppStore((s) => s.caseNotes[txnId]);
-  const addCaseNote = useAppStore((s) => s.addCaseNote);
+  const storeNotes = useAppStore((s) => s.caseNotes[txnId]);
+  const setCaseNotes = useAppStore((s) => s.setCaseNotes);
   const signedInId = useAppStore((s) => s.signedInAnalystId);
   const highlightNoteId = useAppStore((s) => s.highlightNoteId);
   const setHighlightNoteId = useAppStore((s) => s.setHighlightNoteId);
+  const notesQuery = useCaseNotes(txnId);
+  const addNote = useAddCaseNote(txnId);
+  const { toast } = useToast();
   const [draft, setDraft] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const highlightRef = useRef<HTMLLIElement | null>(null);
 
-  const list: CaseNote[] = notes ?? [];
-  const spotlighted = list.some((n) => n.id === highlightNoteId);
+  /* SERVER SOURCE OF TRUTH — the query result feeds the list AND the
+   * store cache (case-file export, printing and the investigations list
+   * read the store). A failed fetch keeps the cached entries visible. */
+  const list: CaseNote[] = notesQuery.data ?? storeNotes ?? [];
+
+  useEffect(() => {
+    if (!notesQuery.data) return;
+    const cached = storeNotes ?? [];
+    if (cached.length !== notesQuery.data.length || cached.some((n, i) => notesQuery.data[i]?.id !== n.id)) {
+      setCaseNotes(txnId, notesQuery.data);
+    }
+  }, [notesQuery.data, txnId]);
 
   /* palette jump — bring the entry into view, flash it, then drop the spotlight */
   useEffect(() => {
@@ -54,11 +71,26 @@ export function AnalystNotes({ txnId }: { txnId: string }) {
     };
   }, [highlightNoteId, list, setHighlightNoteId]);
 
-  const submit = () => {
+  /** SERVER-PERSISTED: POST /api/transactions/:id/notes — the entry only
+   * appears once the database confirms; failures keep the draft. */
+  const submit = async () => {
     const text = draft.trim();
-    if (!text) return;
-    addCaseNote(txnId, text);
-    setDraft("");
+    if (!text || submitting) return;
+    setSubmitting(true);
+    try {
+      const note = await addNote.mutateAsync({ text, analystId: signedInId });
+      setCaseNotes(txnId, [...(useAppStore.getState().caseNotes[txnId] ?? []), note]);
+      setHighlightNoteId(note.id);
+      setDraft("");
+    } catch (err) {
+      toast({
+        title: "Note not saved",
+        description: err instanceof Error && err.message ? err.message : "The server rejected the entry — try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const insertChip = (text: string) => {
@@ -120,7 +152,7 @@ export function AnalystNotes({ txnId }: { txnId: string }) {
             onKeyDown={(e) => {
               if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
                 e.preventDefault();
-                submit();
+                void submit();
               }
             }}
             rows={2}
@@ -133,17 +165,21 @@ export function AnalystNotes({ txnId }: { txnId: string }) {
               <span className="ml-2 hidden sm:inline">append-only — entries cannot be edited</span>
             </p>
             <button
-              onClick={submit}
-              disabled={!draft.trim()}
+              onClick={() => void submit()}
+              disabled={!draft.trim() || submitting}
               className={cn(
                 "flex h-6.5 shrink-0 items-center gap-1.5 rounded-sm border px-2 text-[10.5px] font-semibold transition-all active:scale-95",
-                draft.trim()
+                draft.trim() && !submitting
                   ? "border-intel/45 bg-intel/12 text-intel hover:bg-intel/20"
                   : "cursor-not-allowed border-line bg-surface-2 text-slate-600"
               )}
             >
-              <CornerDownLeft className="h-3 w-3" aria-hidden />
-              Add entry
+              {submitting ? (
+                <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+              ) : (
+                <CornerDownLeft className="h-3 w-3" aria-hidden />
+              )}
+              {submitting ? "Saving…" : "Add entry"}
               <kbd className="hidden rounded border border-line bg-surface-2 px-1 font-mono text-[9px] text-slate-500 sm:inline">
                 ⌘↵
               </kbd>
@@ -250,7 +286,7 @@ export function AnalystNotes({ txnId }: { txnId: string }) {
           </ol>
         ) : (
           <p className="mt-3.5 rounded-sm border border-dashed border-line bg-surface-1/60 px-3 py-3 text-center text-[11.5px] text-slate-600">
-            No entries yet — anything logged here travels with the case file, the audit trail and the printout.
+            No entries yet — anything logged here is saved to the ledger and travels with the case file, the audit trail and the printout.
           </p>
         )}
       </div>

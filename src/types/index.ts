@@ -74,6 +74,10 @@ export interface Transaction {
   recommendation: RiskAction | null;
   /** Model confidence in the recommendation, 0–100. */
   confidence: number | null;
+  /** Server-persisted handoff: current assignee (analyst roster id). */
+  assigneeId?: string | null;
+  /** Server-persisted SLA-breach escalation target (analyst roster id). */
+  escalatedTo?: string | null;
   /** Present only after the AI investigation has run. */
   investigation?: Investigation;
 }

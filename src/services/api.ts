@@ -30,6 +30,36 @@ import type {
   TransactionStatus,
 } from "@/types";
 
+/*
+ * Admin token (optional hardening): when a deployment sets ADMIN_TOKEN,
+ * guarded routes answer 401 { adminRequired: true }; the AI panel and
+ * destructive controls then prompt for the token once per session and it
+ * is attached here. The token never touches persisted storage.
+ */
+const ADMIN_TOKEN_KEY = "razorshield-admin-token";
+
+export function getAdminToken(): string {
+  try {
+    return sessionStorage.getItem(ADMIN_TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function setAdminToken(token: string): void {
+  try {
+    if (token) sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+    else sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+  } catch {
+    /* storage unavailable — headers simply stay empty */
+  }
+}
+
+function adminHeaders(): Record<string, string> {
+  const token = getAdminToken();
+  return token ? { "x-admin-token": token } : {};
+}
+
 export const ENDPOINTS = {
   transactions: "/api/transactions",
   transaction: (id: string) => `/api/transactions/${id}`,
@@ -47,14 +77,22 @@ export const ENDPOINTS = {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...adminHeaders(),
+      ...(init?.headers ?? {}),
+    },
     cache: "no-store",
   });
   const data = (await res.json().catch(() => null)) as
     | (T & { ok?: boolean; error?: string })
     | null;
   if (!res.ok || (data && data.ok === false)) {
-    throw new Error(data?.error || `RazorShield API ${res.status}: ${path}`);
+    const err = new Error(data?.error || `RazorShield API ${res.status}: ${path}`) as Error & {
+      adminRequired?: boolean;
+    };
+    if (data && (data as { adminRequired?: boolean }).adminRequired) err.adminRequired = true;
+    throw err;
   }
   return data as T;
 }
@@ -161,6 +199,9 @@ export interface ImportResult {
 export async function importRowsToLedger(payload: {
   datasetName: string;
   rows: Record<string, unknown>[];
+  /** 1-based chunk index/total — progress reporting for chunked sends. */
+  chunkIndex?: number;
+  chunkTotal?: number;
 }): Promise<ImportResult> {
   return request<ImportResult>(ENDPOINTS.import, {
     method: "POST",
@@ -179,6 +220,53 @@ export async function recordDecision(
     body: JSON.stringify({ decision, note, analystId }),
   });
   return res.transaction;
+}
+
+/** Server-persisted case handoff (audited). Pass null to unassign. */
+export async function recordAssignment(txnId: string, assignee: string | null, analystId?: string): Promise<Transaction> {
+  const res = await request<{ ok: true; transaction: Transaction }>(ENDPOINTS.transaction(txnId), {
+    method: "PATCH",
+    body: JSON.stringify({ assignee, analystId }),
+  });
+  return res.transaction;
+}
+
+/** Server-persisted SLA-breach escalation (audited). */
+export async function recordEscalation(txnId: string, escalateTo: string, analystId?: string): Promise<Transaction> {
+  const res = await request<{ ok: true; transaction: Transaction }>(ENDPOINTS.transaction(txnId), {
+    method: "PATCH",
+    body: JSON.stringify({ escalateTo, analystId }),
+  });
+  return res.transaction;
+}
+
+/* ------------------------------------------------------------------ */
+/* Case notes — server-persisted analyst notebook                      */
+/* ------------------------------------------------------------------ */
+
+export interface CaseNoteDto {
+  id: string;
+  text: string;
+  analystId: string;
+  at: string;
+}
+
+export async function getCaseNotes(txnId: string): Promise<CaseNoteDto[]> {
+  const res = await request<{ ok: true; notes: CaseNoteDto[] }>(
+    `${ENDPOINTS.transaction(txnId)}/notes`,
+  );
+  return res.notes;
+}
+
+export async function addCaseNote(txnId: string, text: string, analystId: string): Promise<CaseNoteDto> {
+  const res = await request<{ ok: true; note: CaseNoteDto }>(
+    `${ENDPOINTS.transaction(txnId)}/notes`,
+    {
+      method: "POST",
+      body: JSON.stringify({ text, analystId }),
+    },
+  );
+  return res.note;
 }
 
 export async function updateTransactionStatus(txnId: string, status: TransactionStatus): Promise<Transaction> {
@@ -269,14 +357,17 @@ export interface RiskMetricsResponse {
     critical: number;
     pendingInvestigations: number;
     avgRiskScore: number;
-    fraudExposure: number;
+    /** Rupee value of HIGH+CRITICAL rows — flagged for review, NOT confirmed fraud. */
+    flaggedValue: number;
+    /** Engine score at/above which a row is counted as flagged (MEDIUM). */
+    flaggedThreshold: number;
   };
   riskDistribution: { level: string; count: number; value: number }[];
   statusDistribution: { status: string; count: number }[];
   byPaymentMethod: { method: string; count: number; value: number }[];
   volumeOverTime: { label: string; count: number; value: number; flagged: number }[];
   topFlaggedMerchants: { merchant: string; flaggedCount: number; value: number; avgRiskScore: number }[];
-  highRiskCustomers: { customerId: string; customerName: string; flaggedCount: number; avgRiskScore: number; exposure: number }[];
+  highRiskCustomers: { customerId: string; customerName: string; flaggedCount: number; avgRiskScore: number; flaggedValue: number }[];
   queue: { investigating: number; underReview: number; resolvedToday: number };
 }
 
@@ -331,8 +422,16 @@ export interface SystemHealth {
   database: { ok: boolean; latencyMs: number };
   counts: { transactions: number; customers: number; datasets: number; auditEvents: number };
   queue: { investigating: number; underReview: number };
-  llm: { configured: boolean; source: "runtime" | "env" | "none"; provider: string | null; model: string | null };
+  llm: {
+    configured: boolean;
+    source: "runtime" | "env" | "none";
+    provider: string | null;
+    model: string | null;
+    verification: "verified" | "saved" | null;
+    keyEncryption: string;
+  };
   engine: { version: string; kind: string };
+  security: { adminGuard: "env" | "open"; hint: string };
   serverTime: string;
 }
 

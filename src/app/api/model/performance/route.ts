@@ -11,7 +11,7 @@
 
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { ENGINE_VERSION } from "@/lib/riskEngine";
+import { ENGINE_VERSION, FLAG_THRESHOLD } from "@/lib/riskEngine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,7 +26,12 @@ export async function GET() {
   });
 
   const totalTransactions = await db.transaction.count();
-  const threshold = 40; // alert line used by the calibration views
+  /* The detection threshold is the ENGINE'S OWN definition — a row is
+   * "predicted fraud" when it scores MEDIUM or above (FLAG_THRESHOLD =
+   * 28), the exact band that enters the review flow. Every evaluation
+   * surface (this endpoint, Dataset Studio, dashboard metrics) reads the
+   * same constant so no view can quietly redefine "flagged". */
+  const threshold = FLAG_THRESHOLD;
 
   if (labeled.length < MIN_LABELED) {
     return NextResponse.json({
@@ -83,6 +88,6 @@ export async function GET() {
       falseNegativeCostPerCase: Math.round(fnValue / Math.max(fn, 1)),
       currency: "INR",
     },
-    note: "Measured on the labelled rows currently stored in the ledger. Scores come from the deterministic rule engine (rse) — not a trained ML classifier.",
+    note: 'Measured on the labelled rows currently stored in the ledger. "Detected" means the engine scored the row MEDIUM or above (score ≥ 28) — the same band it routes to review. Scores come from the deterministic rule engine (rse) — not a trained ML classifier.',
   });
 }

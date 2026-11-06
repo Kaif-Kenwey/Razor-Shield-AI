@@ -21,6 +21,7 @@ import {
 import { llmConfigured, resolveLlmConfig } from "@/lib/agent/llm";
 import { db } from "@/lib/db";
 import { writeAudit } from "@/lib/server/ledger";
+import { clientKey, rateLimit } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
 
@@ -94,6 +95,15 @@ function sanitizeContext(raw: unknown): AgentCaseContext | null {
 }
 
 export async function POST(request: Request) {
+  /* Investigations may hit a paid LLM endpoint — rate limited so a public
+   * deployment cannot be used to burn someone's token balance. */
+  const rl = rateLimit(clientKey(request, "investigate"), 20, 60_000);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { ok: false, reason: `Investigation rate limit — retry in ${rl.retryAfterSec}s.` },
+      { status: 429 },
+    );
+  }
   let body: unknown;
   try {
     body = await request.json();

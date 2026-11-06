@@ -27,7 +27,8 @@ import { RiskLevelBadge, StatusBadge } from "@/components/risk/RiskBadge";
 import { EmptyState } from "@/components/shared/States";
 import { SlaChip, slaState, SLA_BREACH_MINUTES } from "@/components/shared/SlaChip";
 import { isDialogOpen, isTypingTarget } from "@/components/layout/KeyboardShortcuts";
-import { useAppStore } from "@/store/appStore";
+import { useAppStore, L3_LEAD_ID } from "@/store/appStore";
+import { useRecordEscalation } from "@/hooks/useLedger";
 import { useToast } from "@/hooks/use-toast";
 import { ANALYSTS } from "@/data/mockData";
 import { downloadCasesCsv } from "@/lib/caseFile";
@@ -59,7 +60,29 @@ export function InvestigationsView() {
   const escalations = useAppStore((s) => s.escalations);
   const openInvestigation = useAppStore((s) => s.openInvestigation);
   const setDigestOpen = useAppStore((s) => s.setDigestOpen);
+  const recordEscalation = useRecordEscalation();
   const { toast } = useToast();
+
+  /** SERVER-PERSISTED escalation: the audited PATCH runs first; the local
+   * state (and the re-route to the L3 lead) only applies on success. */
+  const escalate = (txnId: string) => {
+    void recordEscalation
+      .mutateAsync({ txnId, escalateTo: L3_LEAD_ID, analystId: useAppStore.getState().signedInAnalystId })
+      .then(() => {
+        escalateCase(txnId);
+        toast({
+          title: "Case escalated to A. Das (L3 fraud lead)",
+          description: `${txnId} breached the ${SLA_BREACH_MINUTES}m escalation threshold — handoff re-routed and the escalation was persisted to the audit trail.`,
+        });
+      })
+      .catch((err: unknown) => {
+        toast({
+          title: "Escalation not saved",
+          description: err instanceof Error && err.message ? err.message : "The server rejected the escalation — try again.",
+          variant: "destructive",
+        });
+      });
+  };
   const [tab, setTab] = useState<"active" | "watched" | "resolved">("active");
 
   const matchesAssignee = (id: string) => {
@@ -473,21 +496,13 @@ export function InvestigationsView() {
                       title="SLA breached — one-click escalate to the L3 fraud lead (A. Das) and record the escalation"
                       onClick={(e) => {
                         e.stopPropagation();
-                        escalateCase(t.id);
-                        toast({
-                          title: "Case escalated to A. Das (L3 fraud lead)",
-                          description: `${t.id} breached the ${SLA_BREACH_MINUTES}m escalation threshold — handoff re-routed and the escalation was recorded in the audit trail.`,
-                        });
+                        escalate(t.id);
                       }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           e.stopPropagation();
-                          escalateCase(t.id);
-                          toast({
-                            title: "Case escalated to A. Das (L3 fraud lead)",
-                            description: `${t.id} breached the ${SLA_BREACH_MINUTES}m escalation threshold — handoff re-routed and the escalation was recorded in the audit trail.`,
-                          });
+                          escalate(t.id);
                         }
                       }}
                       className="mr-auto inline-flex items-center gap-1.5 rounded-sm border border-risk-critical/45 bg-risk-critical/10 px-2 py-1 text-[10.5px] font-semibold text-risk-critical transition-all hover:bg-risk-critical/20 hover:shadow-[0_0_14px_-4px_rgba(248,113,113,0.7)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-risk-critical/60 active:scale-95"

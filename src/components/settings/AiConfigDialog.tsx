@@ -44,6 +44,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppStore, type LlmStatus } from "@/store/appStore";
+import { getAdminToken, setAdminToken } from "@/services/api";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { PROVIDERS, providerById, type ProviderId } from "@/lib/agent/providers";
@@ -54,7 +55,7 @@ import {
   type ModelCatalogueState,
 } from "@/components/settings/ModelCombobox";
 
-type TestResult = { ok: true; latencyMs: number; model: string } | { ok: false; error: string } | null;
+type TestResult = { ok: true; latencyMs: number; model: string; verifiedSaved?: boolean } | { ok: false; error: string } | null;
 
 /** Wire shape of POST /api/llm/models — every variant it can return. */
 type ModelsResponse =
@@ -164,7 +165,12 @@ export function AiConfigDialog() {
   const savedKeyApplies = Boolean(status?.hasRuntimeConfig) && (savedSameProvider || savedSameBaseUrl);
 
   const keyLen = apiKey.trim().length;
-  const keyValid = meta?.requiresKey ? keyLen >= 8 : true;
+  /* Key rules (server-enforced): a typed key always works; an EMPTY key
+   * field also works when the saved config covers this provider/endpoint
+   * — the server reuses the stored credential without ever echoing it.
+   * Switching models therefore never demands retyping the key. */
+  const keyRequired = Boolean(meta?.requiresKey) && !savedKeyApplies;
+  const keyValid = keyRequired ? keyLen >= 8 : true;
   const headersError = (() => {
     const raw = extraHeaders.trim();
     if (!raw) return null;
@@ -191,9 +197,7 @@ export function AiConfigDialog() {
 
   const baseUrlValid = isValidHttpUrl(baseUrl.trim());
   const modelValid = meta?.hasCatalogue ? model.trim().length > 0 : true;
-  /** Saved key exists server-side but the field is empty — no live probe possible. */
-  const savedKeyBlocksTest = Boolean(meta?.requiresKey) && savedKeyApplies && keyLen === 0;
-  const canTest = baseUrlValid && modelValid && keyValid && !headersError && !savedKeyBlocksTest;
+  const canTest = baseUrlValid && modelValid && keyValid && !headersError;
   const canSave = baseUrlValid && modelValid && keyValid && !headersError;
 
   /**
@@ -311,12 +315,15 @@ export function AiConfigDialog() {
     try {
       const res = await fetch("/api/llm-config/test", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...adminHeadersExtra() },
         body: JSON.stringify({
           baseUrl: baseUrl.trim(),
+          /* Empty key = let the server reuse the stored credential for
+           * this endpoint (it never echoes the key back). */
           apiKey: effectiveApiKey,
           model: model.trim(),
           extraHeaders: parsedHeaders,
+          provider: providerId ?? undefined,
         }),
         signal: AbortSignal.timeout(15_000),
       });
@@ -328,37 +335,77 @@ export function AiConfigDialog() {
     }
   }
 
+  /** When a deployment sets ADMIN_TOKEN, config writes answer 401 —
+   * capture the token once per session and retry transparently. */
+  function adminHeadersExtra(): Record<string, string> {
+    return getAdminToken() ? { "x-admin-token": getAdminToken() } : {};
+  }
+
+  async function saveConfig(adminToken?: string): Promise<{ ok: boolean; error?: string; adminRequired?: boolean }> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (adminToken) headers["x-admin-token"] = adminToken;
+    const res = await fetch("/api/llm-config", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        baseUrl: baseUrl.trim(),
+        apiKey: effectiveApiKey,
+        model: model.trim(),
+        extraHeaders: parsedHeaders,
+        provider: providerId ?? undefined,
+        /* The OpenRouter "Automatic Free Model" choice is recorded as routing. */
+        routing:
+          providerId === "openrouter" && model.trim() === AUTOMATIC_FREE_MODEL_ID
+            ? AUTOMATIC_FREE_MODEL_ID
+            : undefined,
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; adminRequired?: boolean };
+    if (!res.ok || !data.ok) return { ok: false, error: data.error, adminRequired: data.adminRequired };
+    return { ok: true };
+  }
+
   async function handleSave() {
     if (!meta) return;
     setSaving(true);
     try {
-      const res = await fetch("/api/llm-config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          baseUrl: baseUrl.trim(),
-          apiKey: effectiveApiKey,
-          model: model.trim(),
-          extraHeaders: parsedHeaders,
-          provider: providerId ?? undefined,
-          /* The OpenRouter "Automatic Free Model" choice is recorded as routing. */
-          routing:
-            providerId === "openrouter" && model.trim() === AUTOMATIC_FREE_MODEL_ID
-              ? AUTOMATIC_FREE_MODEL_ID
-              : undefined,
-        }),
-      });
-      const data = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || !data.ok) {
-        toast({ title: "Could not save the configuration", description: data.error ?? "Check the fields and try again." });
+      let result = await saveConfig();
+      /* Deployment requires an admin token — prompt inline, then retry. */
+      if (!result.ok && result.adminRequired) {
+        const token = window.prompt(
+          "This deployment requires an admin token to change AI configuration. Enter ADMIN_TOKEN:",
+          "",
+        );
+        if (!token) {
+          toast({ title: "Save cancelled", description: "An admin token is required to change the AI configuration on this deployment." });
+          return;
+        }
+        setAdminToken(token);
+        result = await saveConfig(token);
+      }
+      if (!result.ok) {
+        toast({ title: "Could not save the configuration", description: result.error ?? "Check the fields and try again." });
         return;
       }
       await refreshStatus();
       const modelLabel =
         model.trim() === AUTOMATIC_FREE_MODEL_ID ? "automatic free model" : model.trim() || "endpoint default";
+      /* HONEST ACTIVATION: save = activate (runtime config wins), but the
+       * Verified state only comes from a real probe — run it right away. */
+      const testRes = await fetch("/api/llm-config/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ baseUrl: baseUrl.trim(), model: model.trim(), provider: providerId ?? undefined }),
+        signal: AbortSignal.timeout(20_000),
+      }).catch(() => null);
+      const test = testRes ? ((await testRes.json()) as TestResult) : null;
+      setTestResult(test);
+      await refreshStatus();
       toast({
-        title: `LLM connected — ${modelLabel} via ${meta.name}`,
-        description: `${hostOf(baseUrl.trim())} · the investigator is live on this endpoint.`,
+        title: test?.ok ? `LLM connected & verified — ${modelLabel} via ${meta.name}` : `Saved — ${modelLabel} via ${meta.name} (not verified yet)`,
+        description: test?.ok
+          ? `Live probe passed in ${test.latencyMs}ms on ${test.model}. The investigator now answers from this endpoint.`
+          : (test && "error" in test && test.error) || "Saved server-side. The status chip stays amber until a connection test passes.",
       });
       setOpen(false);
     } catch {
@@ -371,7 +418,7 @@ export function AiConfigDialog() {
   async function handleDisconnect() {
     setClearing(true);
     try {
-      await fetch("/api/llm-config", { method: "DELETE" });
+      await fetch("/api/llm-config", { method: "DELETE", headers: { "Content-Type": "application/json", ...adminHeadersExtra() } });
       await refreshStatus();
       setProviderId(null);
       setBaseUrl("");
@@ -445,13 +492,27 @@ export function AiConfigDialog() {
             {!status ? (
               <span className="text-slate-400">Checking investigator status…</span>
             ) : live ? (
-              <span className="min-w-0">
-                LLM live ·{" "}
-                <span className="font-mono font-medium">
-                  {status.model === AUTOMATIC_FREE_MODEL_ID ? "automatic free model" : status.model || "endpoint default"}
+              <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
+                <span>
+                  LLM live ·{" "}
+                  <span className="font-mono font-medium">
+                    {status.model === AUTOMATIC_FREE_MODEL_ID ? "automatic free model" : status.model || "endpoint default"}
+                  </span>
+                  <span className="text-slate-500"> · {hostOf(status.baseUrl)}</span>
+                  {liveMeta && <span className="text-slate-500"> ({liveMeta})</span>}
                 </span>
-                <span className="text-slate-500"> · {hostOf(status.baseUrl)}</span>
-                {liveMeta && <span className="text-slate-500"> ({liveMeta})</span>}
+                {/* Saved vs Verified — a saved config without a passing
+                    probe never claims a working connection. */}
+                {status.verification?.state === "verified" ? (
+                  <span className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-sm border border-risk-low/45 bg-risk-low/10 px-1.5 py-px text-[9px] font-semibold tracking-wide text-risk-low">
+                    <Check className="h-2.5 w-2.5" aria-hidden />
+                    VERIFIED
+                  </span>
+                ) : status.source === "runtime" ? (
+                  <span className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-sm border border-risk-medium/40 bg-risk-medium/10 px-1.5 py-px text-[9px] font-semibold tracking-wide text-risk-medium">
+                    SAVED · NOT VERIFIED
+                  </span>
+                ) : null}
               </span>
             ) : (
               <span>Heuristic mode — no LLM connected. The rules engine produces evidence and the verdict.</span>
@@ -672,8 +733,8 @@ export function AiConfigDialog() {
                   </p>
                   {savedKeyApplies && keyLen === 0 && (
                     <p className="rounded-sm border border-intel/25 bg-intel/8 px-2.5 py-1.5 text-[10.5px] leading-snug text-slate-400">
-                      Key already saved server-side — to keep it, save with the same key, or use Disconnect first.
-                      {savedSameProvider && " The model list above already works with the saved key."}
+                      Key already saved server-side (encrypted) — leave the field empty to REUSE it while you change the model
+                      or headers. Type a new key only to replace the stored one.
                     </p>
                   )}
                 </section>
@@ -722,8 +783,8 @@ export function AiConfigDialog() {
             >
               {testResult.ok ? (
                 <span>
-                  Connection OK — {testResult.latencyMs}ms ·{" "}
-                  <span className="font-medium">{testResult.model}</span>. Save to activate.
+                  Connection OK — {testResult.latencyMs}ms · <span className="font-medium">{testResult.model}</span>.
+                  {status?.verification?.state === "verified" ? " This exact config is VERIFIED." : " Save to activate this endpoint."}
                 </span>
               ) : (
                 <span>{testResult.error}</span>
@@ -734,39 +795,16 @@ export function AiConfigDialog() {
           {/* E — connection controls */}
           <div className="space-y-1.5 border-t border-line pt-3.5">
             <div className="flex flex-wrap items-center gap-2">
-              {savedKeyBlocksTest ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="inline-block">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled
-                        aria-disabled
-                        className="h-8 gap-1.5 border-line bg-surface-1 text-[12px] text-slate-300"
-                      >
-                        <PlugZap className="h-3.5 w-3.5" aria-hidden />
-                        Test connection
-                      </Button>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="border-line bg-surface-3 text-slate-200">
-                    Key is stored server-side only — type it again to run a live test.
-                  </TooltipContent>
-                </Tooltip>
-              ) : (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleTest}
-                  disabled={!canTest || testing || !meta}
-                  className="h-8 gap-1.5 border-line bg-surface-1 text-[12px] text-slate-300 hover:bg-surface-2"
-                >
-                  {testButton}
-                </Button>
-              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleTest}
+                disabled={!canTest || testing || !meta}
+                className="h-8 gap-1.5 border-line bg-surface-1 text-[12px] text-slate-300 hover:bg-surface-2"
+              >
+                {testButton}
+              </Button>
               <Button
                 type="button"
                 size="sm"
@@ -793,19 +831,21 @@ export function AiConfigDialog() {
             </div>
             {status?.hasRuntimeConfig && (
               <p className="text-[10px] leading-snug text-slate-600">
-                Disconnect removes the saved config — the investigator falls back to{" "}
-                <span className="font-mono">.env</span>, then to the heuristics engine.
+                Saving activates the endpoint immediately — the status chip shows VERIFIED only after a real probe passes.
+                Disconnect removes the saved config; the investigator falls back to <span className="font-mono">.env</span>, then
+                to the heuristics engine.
               </p>
             )}
           </div>
 
-          {/* F — privacy note */}
+          {/* F — privacy + security note */}
           <p className="text-[10.5px] leading-relaxed text-slate-600">
             Case evidence for investigated transactions is sent to the selected provider — minimum-necessary
             masking is applied before anything leaves the app. With Ollama everything runs locally and nothing
-            leaves the machine. Keys are stored server-side only (<span className="font-mono">db/llm-config.json</span>,{" "}
-            gitignored), never returned to the browser and never logged. Disconnect to fall back to{" "}
-            <span className="font-mono">.env</span>, then to heuristics.
+            leaves the machine. Keys are stored server-side only — <span className="font-mono">db/llm-config.json</span>{" "}
+            (gitignored) with the key <span className="font-medium text-slate-500">encrypted at rest (AES-256-GCM)</span>,
+            never returned to the browser and never logged. Local/private network endpoints are blocked except for
+            your own Ollama install. Disconnect to fall back to <span className="font-mono">.env</span>, then to heuristics.
           </p>
         </div>
       </DialogContent>

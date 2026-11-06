@@ -132,8 +132,13 @@ model Transaction {
   dataSource     String         @default("demo")
   /// Ground-truth fraud label when known (1/0), else null.
   label          Int?
+  /// Current assignee (analyst roster id) — server-persisted handoff.
+  assigneeId     String?
+  /// Analyst roster id this SLA-breach case was escalated to.
+  escalatedTo    String?
   investigation  Investigation?
   auditEvents    AuditEvent[]
+  caseNotes      CaseNote[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -172,6 +177,22 @@ model Investigation {
   createdAt                 DateTime    @default(now())
 
   @@index([transactionId])
+}
+
+/// Append-only analyst notebook entry for one case. Server-persisted so
+/// the notebook survives browsers, devices and demo-data clears — it is
+/// part of the case record, not client state.
+model CaseNote {
+  id            String      @id @default(cuid())
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  transactionId String
+  /// Notebook text (trimmed, bounded by the API schema).
+  text          String
+  /// Roster id of the analyst who logged the entry (e.g. "RK").
+  analystId     String
+  createdAt     DateTime    @default(now())
+
+  @@index([transactionId, createdAt])
 }
 
 /// Append-only audit log for system, engine and analyst actions.

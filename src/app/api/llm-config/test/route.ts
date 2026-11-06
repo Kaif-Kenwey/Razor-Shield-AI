@@ -1,10 +1,19 @@
 /**
  * POST /api/llm-config/test — probe an OpenAI-compatible endpoint with a
- * tiny chat completion so the UI can verify credentials BEFORE saving.
+ * tiny chat completion so the UI can verify credentials.
  *
  * Accepts an explicit config in the body (test-before-save flow); when
- * the body is empty the currently resolved configuration is probed.
- * Failures return a human-readable reason, never a stack trace.
+ * the body is empty the currently resolved configuration is probed. When
+ * the caller supplies an endpoint but no key, the saved key is reused
+ * server-side when it belongs to the same endpoint — so re-verifying
+ * after a model change never demands retyping credentials.
+ *
+ * A successful probe of the CURRENTLY SAVED config records a Verified
+ * stamp (endpoint + model); the UI distinguishes Saved from Verified so
+ * an untested config never implies a working connection.
+ *
+ * Failures return a human-readable reason, never a stack trace. Every
+ * probe passes the shared SSRF URL guard first.
  */
 
 import { NextResponse } from "next/server";
@@ -14,13 +23,26 @@ import {
   resolveLlmConfig,
   type LlmConfig,
 } from "@/lib/agent/llm";
+import { markRuntimeConfigVerified, readRuntimeLlmConfig, reusableSavedKey } from "@/lib/agent/llmConfigStore";
+import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
+import { clientKey, rateLimit } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type ProbeResult = { ok: true; latencyMs: number; model: string } | { ok: false; error: string };
+type ProbeResult = { ok: true; latencyMs: number; model: string; verifiedSaved: boolean } | { ok: false; error: string };
 
 async function probe(cfg: LlmConfig): Promise<ProbeResult> {
+  /* SSRF guard before any outbound byte. Only the local Ollama provider
+   * may target this machine; env configs need LLM_ALLOW_LOCAL=1. */
+  const allowLocal = cfg.provider === "ollama" || process.env.LLM_ALLOW_LOCAL === "1";
+  try {
+    await assertSafeLlmUrl(cfg.baseUrl, { allowLocal });
+  } catch (err) {
+    const reason = err instanceof UrlGuardError ? err.message : "endpoint failed the safety check";
+    return { ok: false, error: `Blocked: ${reason}` };
+  }
+
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12_000);
@@ -36,7 +58,7 @@ async function probe(cfg: LlmConfig): Promise<ProbeResult> {
     if (cfg.routing === AUTO_FREE_ROUTING || cfg.model === AUTO_FREE_ROUTING) {
       const resolved = await resolveAutoFreeModelForProbe(cfg);
       if (!resolved) {
-        return { ok: false, error: "Automatic free routing found no zero-cost model in the catalogue right now" };
+        return { ok: false, error: "Automatic free routing found no zero-cost chat model in the catalogue right now" };
       }
       effectiveModel = resolved;
     }
@@ -59,7 +81,9 @@ async function probe(cfg: LlmConfig): Promise<ProbeResult> {
           ? "Authentication failed — the endpoint rejected the API key"
           : res.status === 404
             ? "Endpoint not found — check the base URL (it should end at /v1; /chat/completions is added automatically)"
-            : `Endpoint responded ${res.status}`;
+            : res.status === 429
+              ? "Rate limited by the provider — free models have request limits that depend on account status; wait a moment and retry"
+              : `Endpoint responded ${res.status}`;
       return { ok: false, error: detail };
     }
 
@@ -73,7 +97,7 @@ async function probe(cfg: LlmConfig): Promise<ProbeResult> {
     if (typeof content !== "string" || !content.trim()) {
       return { ok: false, error: "Endpoint replied but returned an empty completion" };
     }
-    return { ok: true, latencyMs: Date.now() - started, model: model || "endpoint default" };
+    return { ok: true, latencyMs: Date.now() - started, model: model || "endpoint default", verifiedSaved: false };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       return { ok: false, error: "Timed out after 12s — endpoint unreachable" };
@@ -85,6 +109,14 @@ async function probe(cfg: LlmConfig): Promise<ProbeResult> {
 }
 
 export async function POST(request: Request) {
+  const rl = rateLimit(clientKey(request, "llm-probe"), 20, 60_000);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { ok: false, error: `Too many connection tests — retry in ${rl.retryAfterSec}s.` },
+      { status: 429 },
+    );
+  }
+
   let body: unknown = null;
   try {
     body = await request.json();
@@ -93,11 +125,11 @@ export async function POST(request: Request) {
   }
 
   const b = (body ?? {}) as Record<string, unknown>;
-  const providedBase = typeof b.baseUrl === "string" ? b.baseUrl.trim() : "";
+  const providedBase = typeof b.baseUrl === "string" ? b.baseUrl.trim().replace(/\/+$/, "") : "";
   const providedKey = typeof b.apiKey === "string" ? b.apiKey.trim() : "";
 
   let cfg: LlmConfig | null = null;
-  if (providedBase && providedKey) {
+  if (providedBase) {
     let extraHeaders: Record<string, string> = {};
     if (b.extraHeaders && typeof b.extraHeaders === "object" && !Array.isArray(b.extraHeaders)) {
       extraHeaders = Object.fromEntries(
@@ -106,23 +138,42 @@ export async function POST(request: Request) {
         ),
       );
     }
+    let apiKey = providedKey;
+    /* Key reuse: an empty key field against a saved endpoint reuses the
+     * stored credential server-side — the raw key never round-trips. */
+    if (!apiKey) {
+      const reused = reusableSavedKey(typeof b.provider === "string" ? b.provider : undefined, providedBase);
+      if (reused) apiKey = reused;
+    }
     cfg = {
-      baseUrl: providedBase.replace(/\/+$/, ""),
-      apiKey: providedKey,
+      baseUrl: providedBase,
+      apiKey,
       model: typeof b.model === "string" ? b.model.trim() : "",
       extraHeaders,
       routing: typeof b.routing === "string" ? b.routing.trim() : undefined,
+      provider: typeof b.provider === "string" ? b.provider : undefined,
     };
   } else {
     cfg = resolveLlmConfig();
   }
 
-  if (!cfg) {
+  if (!cfg || !cfg.apiKey) {
     return NextResponse.json(
       { ok: false, error: "No LLM configured yet — fill in the base URL and API key first" },
       { status: 200 },
     );
   }
 
-  return NextResponse.json(await probe(cfg));
+  const result = await probe(cfg);
+
+  /* Verification stamp: only when the probe ran against the config that
+   * is actually saved (same endpoint + model) does it count as Verified. */
+  if (result.ok) {
+    const saved = readRuntimeLlmConfig();
+    if (saved && saved.baseUrl === cfg.baseUrl && saved.model === cfg.model) {
+      markRuntimeConfigVerified(result.model);
+    }
+  }
+
+  return NextResponse.json(result);
 }

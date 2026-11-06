@@ -62,13 +62,19 @@ export interface ScoreOutcome {
 }
 
 /** Data-quality warnings for fields the engine needs but the submitter omitted. */
-function qualityWarnings(input: NewTransactionInput): string[] {
+function qualityWarnings(input: NewTransactionInput, safeAt: Date): string[] {
   const warnings: string[] = [];
   if (!Number.isFinite(input.amount) || input.amount <= 0) warnings.push("Missing or invalid amount — scored with amount evidence disabled.");
   if (!input.merchant?.trim()) warnings.push("Merchant missing — merchant-outlier signal cannot fire.");
   if (!input.location?.trim()) warnings.push("Location missing — travel and location signals cannot fire.");
   if (!input.device?.trim()) warnings.push("Device fingerprint missing — device signals cannot fire.");
-  if (!input.timestamp) warnings.push("No timestamp supplied — scored at ingestion time.");
+  if (!input.timestamp) {
+    warnings.push("No timestamp supplied — scored at ingestion time.");
+  } else if (Number.isNaN(new Date(input.timestamp).getTime())) {
+    warnings.push("Timestamp is invalid/unparseable — scored at ingestion time instead of silently defaulting.");
+  } else if (safeAt.getTime() > Date.now() + 5 * 60_000) {
+    warnings.push("Timestamp is in the future — history is cut at this timestamp, so later ledger rows were not used as context.");
+  }
   return warnings;
 }
 
@@ -79,9 +85,11 @@ function qualityWarnings(input: NewTransactionInput): string[] {
 export async function scoreAndPersistTransaction(
   input: NewTransactionInput,
 ): Promise<ScoreOutcome> {
-  const warnings = qualityWarnings(input);
   const at = input.timestamp ? new Date(input.timestamp) : new Date();
+  /* Invalid timestamps are scored at ingestion time but flagged — never
+   * silently treated as "now" (review fix: honest data-quality trail). */
   const safeAt = Number.isNaN(at.getTime()) ? new Date() : at;
+  const warnings = qualityWarnings(input, safeAt);
 
   const customerId = input.customerId.trim() || "CUS_UNKNOWN";
 
@@ -97,15 +105,19 @@ export async function scoreAndPersistTransaction(
     },
   });
 
-  /* 2 — history + context. Both loads are bounded; order matches engine
-   * expectations (chronological, indexes assigned by scoreBatch inputs). */
+  /* 2 — history + context, TIME-AWARE. Both loads are bounded to rows at
+   * or before the payment's own timestamp: a historical import must never
+   * see the future. A ₹2,000 payment at 10:00 is scored against history
+   * up to 10:00 — the ₹95,000 payment at 10:10 cannot leak backwards into
+   * its baselines. Caps stay at 120 customer rows / 600 portfolio rows. */
   const [customerHistory, portfolio] = await Promise.all([
     db.transaction.findMany({
-      where: { customerId },
+      where: { customerId, timestamp: { lte: safeAt } },
       orderBy: { timestamp: "desc" },
       take: CUSTOMER_HISTORY_CAP,
     }),
     db.transaction.findMany({
+      where: { timestamp: { lte: safeAt } },
       orderBy: { timestamp: "desc" },
       take: PORTFOLIO_CONTEXT_CAP,
     }),
@@ -222,6 +234,7 @@ export async function scoreAndPersistTransaction(
           signalCount: scored.signals.length,
           historyUsed: historyInputs.length,
           contextRows: contextInputs.length,
+          contextCutoff: safeAt.toISOString(),
         }),
         transactionId: input.id,
       },

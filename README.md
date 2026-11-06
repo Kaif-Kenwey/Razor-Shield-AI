@@ -86,12 +86,24 @@ Three tools live under the scored results, because a score without instruments i
 
 ## Honest limitations
 
-- The engine is a **deterministic rule system**, not a trained ML model. The Detection Benchmark computes precision/recall/F1 and the confusion matrix **only over rows that carry ground-truth labels** in the ledger — unlabelled payments are excluded rather than guessed, and the page says so.
-- The LLM investigator is only as good as the endpoint you give it; latency runs a few seconds and a timeout falls back to heuristics (the UI says which). Free-tier models carry provider rate limits; the *Automatic Free Model* route is only as available as OpenRouter's current $0 catalogue.
+- The engine is a **deterministic rule system**, not a trained ML model. The Detection Benchmark computes precision/recall/F1 and the confusion matrix **only over rows that carry ground-truth labels** in the ledger — unlabelled payments are excluded rather than guessed, and the page says so. "Detected" always means *scored MEDIUM or above (28)* — the same band the engine routes to review — via one shared `FLAG_THRESHOLD` constant.
+- The LLM investigator is only as good as the endpoint you give it; latency runs a few seconds and a timeout falls back to heuristics (the UI says which). Free-tier models carry provider rate limits that depend on account status; the *Automatic Free Model* route is only as available as OpenRouter's current $0 chat-capable catalogue (embedding/image-only models are filtered out by the providers' own modality metadata).
 - The live feed in DEMO mode is a synthetic generator writing to the real ledger with `dataSource="demo"` — labelled as such in the UI. There is **no real payment gateway**; swapping one in is a service-layer change by design.
 - Demo percentages (precision 57% on the seeded 80 rows, say) are demonstrations of method, not statistical proof; import a real labelled file for real numbers.
 - The fraud-graph currently links on shared device fingerprints; adding IP/email/address edges is roadmap work.
 - Persistence is local-first SQLite — right for the demo, not for scale. A production deployment would swap it for managed PostgreSQL (the Prisma schema ports as-is); nothing else in the app assumes a single machine.
+- **Scoring is time-aware, not clairvoyant.** Historical imports are processed chronologically and every row's context (customer history + portfolio baselines) is cut at its own timestamp — a 10:00 AM payment can never be scored with the 10:10 AM ₹95,000 one. Invalid or future timestamps are flagged in the row's warnings instead of being silently treated as "now".
+
+## Security posture (read before deploying publicly)
+
+This is a teaching demo, and the security model is stated plainly rather than oversold:
+
+- **No analyst authentication.** The app is a public, no-login demo by design. Anyone can record decisions in *their own browser session's persona*.
+- **Optional admin token.** Setting `ADMIN_TOKEN` locks the operator surfaces — LLM config writes, demo-data clears and ledger row deletes then require the `x-admin-token` header (the AI panel prompts for it once per session). Without it the app runs in *open demo mode*: writes stay allowed, every guarded action is audit-logged, and System → Admin guard says which mode is live.
+- **Keys are encrypted at rest.** `db/llm-config.json` stores API keys under AES-256-GCM. The encryption key comes from `LLM_CONFIG_SECRET` when set, otherwise from a machine-local random secret in `db/.llm-secret` (0600). Tampered config files fail closed (auth-tag mismatch → treated as absent). Plaintext configs from older builds load once and are re-encrypted on the next save.
+- **SSRF guard on every outbound LLM call.** Operator-supplied endpoints are validated before each request: http(s) only, DNS resolved, and any non-globally-routable answer (private ranges, loopback, link-local incl. `169.254.169.254` cloud metadata, CGNAT, ULA) is rejected — except local Ollama, the one provider allowed to target `localhost`. Known limitation: validation happens pre-request, so a rebinding DNS record could still rotate; full closure needs an egress proxy with IP pinning.
+- **Rate limits on expensive routes.** In-memory per-IP windows cap LLM probes, investigations, ledger writes and imports so a public deployment cannot be used to burn someone's token balance. Per-process only — an edge limiter is still worth having.
+- **The audit trail is the server's, not the browser's.** Decisions, notes, assignments and escalations are written through the API to SQLite (audited as `DECISION_RECORDED`, `NOTE_ADDED`, `CASE_ASSIGNED`, `CASE_ESCALATED`); the UI only shows them after the write succeeds.
 
 ## Tech stack
 
@@ -154,7 +166,9 @@ Click the **AI** button in the top bar and pick a provider card:
 | **Ollama (local)** | none — runs on your machine | your installed models only, fetched from the local server |
 | **Custom endpoint** | your provider's key | type the model id (Together, Fireworks, vLLM, private gateways) |
 
-Paste a key, hit **Test connection** (a real probe — latency and the model that responded are shown), then **Save & activate**. The key is stored server-side in `db/llm-config.json` (gitignored), never returned to the browser, and the in-app config overrides `.env` — disconnect to fall back.
+Paste a key, hit **Test connection** (a real probe — latency and the model that responded are shown), then **Save & activate**. Saving activates the endpoint immediately; the chip reads **VERIFIED** only after a probe has actually passed against the saved config, and stays **SAVED · NOT VERIFIED** (amber) until one does. The key is stored server-side in `db/llm-config.json` (gitignored, **encrypted at rest**), never returned to the browser, and the in-app config overrides `.env` — disconnect to fall back.
+
+**Re-saving without retyping the key:** the key is reused server-side when you keep the same provider + endpoint — change only the model (or headers), leave the key field empty, save. Switching models never demands the credential again.
 
 **Privacy:** case evidence (transaction facts + signal summary, with identifiers minimized) is sent to the provider you select. For a nothing-leaves-the-machine setup use Ollama — the panel marks it LOCAL.
 

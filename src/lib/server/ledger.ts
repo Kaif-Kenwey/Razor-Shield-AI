@@ -67,6 +67,8 @@ export function toUiTransaction(row: LedgerRow): Transaction {
     aiSummary: row.aiSummary,
     recommendation: (row.recommendation as RiskAction | null) ?? null,
     confidence: row.confidence,
+    assigneeId: row.assigneeId,
+    escalatedTo: row.escalatedTo,
     investigation: row.investigation ? investigationFromRow(row.investigation) : undefined,
   };
 }

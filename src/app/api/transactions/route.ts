@@ -22,6 +22,7 @@ import {
   writeAudit,
 } from "@/lib/server/ledger";
 import { newTxnId, scoreAndPersistTransaction } from "@/lib/server/scoringService";
+import { clientKey, rateLimit } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -121,6 +122,10 @@ const createSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const rl = rateLimit(clientKey(request, "txn-create"), 60, 60_000);
+  if (!rl.allowed) {
+    return jsonError(`Ledger writes are rate limited — retry in ${rl.retryAfterSec}s.`, 429);
+  }
   let body: unknown;
   try {
     body = await request.json();

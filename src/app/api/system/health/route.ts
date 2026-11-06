@@ -8,7 +8,8 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { resolveLlmConfig, llmConfigured } from "@/lib/agent/llm";
-import { readRuntimeLlmConfig } from "@/lib/agent/llmConfigStore";
+import { readRuntimeLlmConfig, runtimeConfigVerified } from "@/lib/agent/llmConfigStore";
+import { adminGuardState } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,12 +38,22 @@ export async function GET() {
 
   const runtimeCfg = readRuntimeLlmConfig();
   const active = resolveLlmConfig();
+  const verification = runtimeConfigVerified();
   const llm = {
     configured: llmConfigured(),
     source: runtimeCfg ? ("runtime" as const) : active ? ("env" as const) : ("none" as const),
     provider: runtimeCfg?.provider ?? (active ? "env" : null),
     model: active?.model || null,
+    verification: runtimeCfg
+      ? verification
+        ? ("verified" as const)
+        : ("saved" as const)
+      : null,
+    /** Keys are always encrypted at rest (AES-256-GCM) — surfaced so the
+     * posture is inspectable, not just promised. */
+    keyEncryption: "aes-256-gcm" as const,
   };
+  const guard = adminGuardState();
 
   return NextResponse.json({
     ok: true,
@@ -51,6 +62,16 @@ export async function GET() {
     queue,
     llm,
     engine: { version: "rse-1.2.0", kind: "deterministic-rules" },
+    security: {
+      /** "open" = public demo mode (writes allowed, audit-logged);
+       * "env" = ADMIN_TOKEN set — config writes + destructive routes
+       * require the x-admin-token header. */
+      adminGuard: guard.mode,
+      hint:
+        guard.mode === "open"
+          ? "Open demo mode — set the ADMIN_TOKEN env var to require a token for LLM config changes and destructive routes."
+          : "Admin token required for LLM config changes and destructive routes.",
+    },
     serverTime: new Date().toISOString(),
   });
 }

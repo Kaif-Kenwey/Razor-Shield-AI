@@ -4,11 +4,16 @@
  * Server-side proxy to the selected provider's model endpoint. The API
  * key (if the caller supplies one) is used for THIS request only, never
  * logged, never echoed back. When no key is supplied and the catalogue
- * needs one, the response says `needsAuth` instead of failing.
+ * needs one, the response says `needsAuth` instead of failing. When the
+ * caller omits the key but the saved config belongs to the same
+ * provider, the stored key is reused server-side.
  *
  * FREE labels are computed from each provider's own pricing metadata at
- * fetch time (OpenRouter: prompt+completion price = 0). Nothing here is
- * a hardcoded model list.
+ * fetch time (OpenRouter: prompt+completion price = 0). Models are ALSO
+ * filtered for chat compatibility: OpenRouter's architecture metadata
+ * must include text on both the input and output side, so embedding or
+ * image-only models never appear as selectable options for the
+ * investigator. Nothing here is a hardcoded model list.
  *
  * Body: { provider, baseUrl?, apiKey?, extraHeaders? }
  */
@@ -16,7 +21,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { providerById, type ProviderId } from "@/lib/agent/providers";
-import { readRuntimeLlmConfig } from "@/lib/agent/llmConfigStore";
+import { readRuntimeLlmConfig, reusableSavedKey } from "@/lib/agent/llmConfigStore";
+import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
+import { clientKey, rateLimit } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,21 +43,6 @@ const bodySchema = z.object({
   apiKey: z.string().trim().max(400).optional(),
   extraHeaders: z.record(z.string(), z.string()).optional().default({}),
 });
-
-/** SSRF guard — only http(s) endpoints; Ollama keeps its localhost option. */
-function safeUrl(raw: string, provider: ProviderId): URL | null {
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    const host = url.hostname;
-    const localAllowed = provider === "ollama";
-    const isLocal = host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1";
-    if (isLocal && !localAllowed) return null;
-    return url;
-  } catch {
-    return null;
-  }
-}
 
 async function fetchJson(url: string, headers: Record<string, string>, timeoutMs = 12_000) {
   const controller = new AbortController();
@@ -80,6 +72,9 @@ async function fetchJson(url: string, headers: Record<string, string>, timeoutMs
 
 function friendlyError(err: unknown): { message: string; status?: number } {
   const e = err as { message?: string; status?: number; code?: string; name?: string };
+  if (e instanceof UrlGuardError) {
+    return { message: e.message, status: 400 };
+  }
   if (e?.name === "AbortError" || e?.code === "ABORT_ERR") {
     return { message: "Provider catalogue request timed out — try Refresh Models." };
   }
@@ -100,31 +95,52 @@ function friendlyError(err: unknown): { message: string; status?: number } {
 /* Per-provider catalogue fetchers                                     */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Chat-compatibility from OpenRouter's architecture metadata — a model
+ * must accept text input and produce text output to serve the
+ * investigator. Embeddings/rerankers/image-only models are excluded.
+ */
+function chatCompatible(m: Record<string, unknown>): boolean {
+  const arch = (m.architecture ?? {}) as Record<string, unknown>;
+  const inputs = Array.isArray(arch.input_modalities) ? (arch.input_modalities as unknown[]).map(String) : null;
+  const outputs = Array.isArray(arch.output_modalities) ? (arch.output_modalities as unknown[]).map(String) : null;
+  if (inputs && !inputs.includes("text")) return false;
+  if (outputs && !outputs.includes("text")) return false;
+  if (!inputs && !outputs && typeof arch.modality === "string") {
+    const [inSide, outSide] = arch.modality.split("->").map((s) => s.trim());
+    if (outSide && !outSide.includes("text")) return false;
+    if (inSide && !inSide.includes("text") && !inSide.includes("image")) return false;
+  }
+  return true;
+}
+
 async function openRouterCatalogue(key?: string): Promise<CatalogueModel[]> {
   const data = (await fetchJson("https://openrouter.ai/api/v1/models", {
     ...(key ? { Authorization: `Bearer ${key}` } : {}),
   })) as { data?: Record<string, unknown>[] };
 
-  const models = (data?.data ?? []).map((m) => {
-    const pricing = (m.pricing ?? {}) as Record<string, string>;
-    const prompt = Number.parseFloat(pricing.prompt ?? "1");
-    const completion = Number.parseFloat(pricing.completion ?? "1");
-    const free = prompt === 0 && completion === 0;
-    const context = typeof m.context_length === "number" ? m.context_length : undefined;
-    const id = String(m.id ?? "");
-    const name = typeof m.name === "string" ? m.name : id;
-    // Provider segment of the namespaced id, e.g. "meta-llama" in
-    // "meta-llama/llama-3.3-70b-instruct:free"
-    const providerName = id.includes("/") ? id.split("/")[0] : undefined;
-    return {
-      id,
-      name,
-      free,
-      contextLength: context,
-      providerName,
-      note: free ? "Free (prompt+completion = $0 per token, provider rate limits apply)" : undefined,
-    } satisfies CatalogueModel;
-  });
+  const models = (data?.data ?? [])
+    .filter(chatCompatible)
+    .map((m) => {
+      const pricing = (m.pricing ?? {}) as Record<string, string>;
+      const prompt = Number.parseFloat(pricing.prompt ?? "1");
+      const completion = Number.parseFloat(pricing.completion ?? "1");
+      const free = prompt === 0 && completion === 0;
+      const context = typeof m.context_length === "number" ? m.context_length : undefined;
+      const id = String(m.id ?? "");
+      const name = typeof m.name === "string" ? m.name : id;
+      // Provider segment of the namespaced id, e.g. "meta-llama" in
+      // "meta-llama/llama-3.3-70b-instruct:free"
+      const providerName = id.includes("/") ? id.split("/")[0] : undefined;
+      return {
+        id,
+        name,
+        free,
+        contextLength: context,
+        providerName,
+        note: free ? "Free (prompt+completion = $0 per token — rate limits depend on your OpenRouter account status)" : undefined,
+      } satisfies CatalogueModel;
+    });
 
   models.sort((a, b) => Number(b.free) - Number(a.free) || a.name.localeCompare(b.name));
   return models;
@@ -136,8 +152,9 @@ async function openAiCompatCatalogue(
   extraHeaders: Record<string, string>,
   isOllama: boolean,
 ): Promise<CatalogueModel[]> {
-  const url = safeUrl(base, isOllama ? "ollama" : "custom");
-  if (!url) throw Object.assign(new Error("Invalid provider URL"), { status: 400 });
+  /* SSRF guard — Ollama is the only provider allowed to target localhost. */
+  await assertSafeLlmUrl(base, { allowLocal: isOllama });
+  const url = new URL(base);
   const data = (await fetchJson(`${url.origin}${url.pathname.replace(/\/+$/, "")}/models`, {
     ...(key ? { Authorization: `Bearer ${key}` } : {}),
     ...extraHeaders,
@@ -162,6 +179,14 @@ async function openAiCompatCatalogue(
 }
 
 export async function POST(request: Request) {
+  const rl = rateLimit(clientKey(request, "llm-models"), 30, 60_000);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { ok: false, error: `Too many catalogue requests — retry in ${rl.retryAfterSec}s.` },
+      { status: 429 },
+    );
+  }
+
   let body: unknown;
   try {
     body = await request.json();
@@ -176,9 +201,14 @@ export async function POST(request: Request) {
   const { provider, extraHeaders } = parsed.data;
   const meta = providerById(provider);
 
-  /* Key resolution: caller-supplied → saved runtime key → none. */
+  /* Key resolution: caller-supplied → saved key for the same provider /
+   * same endpoint → none. The stored key never leaves the server. */
   const saved = readRuntimeLlmConfig();
-  const key = parsed.data.apiKey || (saved?.provider === provider ? saved.apiKey : undefined);
+  let key = parsed.data.apiKey || undefined;
+  if (!key) {
+    if (saved?.provider === provider) key = saved.apiKey;
+    else if (parsed.data.baseUrl) key = reusableSavedKey(provider, parsed.data.baseUrl);
+  }
 
   try {
     let models: CatalogueModel[] = [];

@@ -15,6 +15,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { jsonError, toUiTransaction } from "@/lib/server/ledger";
 import { clearDemoData, generateDemoArrival, seedDemoData } from "@/lib/server/demoData";
+import { checkAdminGuard, clientKey, rateLimit } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +23,10 @@ export const dynamic = "force-dynamic";
 const bodySchema = z.object({ action: z.enum(["seed", "arrival"]) });
 
 export async function POST(request: Request) {
+  const rl = rateLimit(clientKey(request, "demo"), 40, 60_000);
+  if (!rl.allowed) {
+    return jsonError(`Demo controls are rate limited — retry in ${rl.retryAfterSec}s.`, 429);
+  }
   let body: unknown;
   try {
     body = await request.json();
@@ -50,7 +55,12 @@ export async function POST(request: Request) {
   });
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  /* Destructive operation — guarded when this deployment sets ADMIN_TOKEN. */
+  const guard = checkAdminGuard(request);
+  if (!guard.ok) {
+    return jsonError(guard.message, 401, { adminRequired: true });
+  }
   const result = await clearDemoData();
   return NextResponse.json({ ok: true, ...result });
 }

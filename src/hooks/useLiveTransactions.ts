@@ -96,6 +96,9 @@ export function useLiveTransactions() {
         const txns = await api.getRecentTransactions(60);
         if (cancelled) return;
         setTransactions(applyPersistedDecisions(txns));
+        /* Server-persisted handoffs/escalations seed the client maps so
+         * assignments survive reloads and other browsers. */
+        useAppStore.getState().hydrateServerCaseState(txns);
         setConnection("online");
       } catch (err) {
         console.error("[RS] boot failed", err);
@@ -171,6 +174,7 @@ export function useLiveTransactions() {
         if (changed) {
           setTransactions(merged.slice(0, STORE_CAP));
         }
+        useAppStore.getState().hydrateServerCaseState(rows);
         if (useAppStore.getState().connection === "offline") {
           useAppStore.getState().setConnection("online");
         }

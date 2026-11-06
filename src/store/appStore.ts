@@ -36,6 +36,13 @@ export interface LlmStatus {
   model: string;
   keyMasked: string;
   hasRuntimeConfig: boolean;
+  provider?: string | null;
+  savedBaseUrl?: string | null;
+  savedModel?: string | null;
+  /** "verified" = a live probe succeeded against this exact config;
+   * "saved" = persisted but never tested. Saved never implies working. */
+  verification?: { state: "verified" | "saved"; at: string | null; model: string | null } | null;
+  adminGuard?: "env" | "open";
 }
 
 interface AppState {
@@ -96,13 +103,19 @@ interface AppState {
   setConnection: (status: ConnectionStatus) => void;
   setPhase: (txnId: string, phase: InvestigationPhase) => void;
   resolveAction: (txnId: string, action: RiskAction, note?: string) => void;
+  /** Merges server-persisted handoffs/escalations (from ledger rows) into
+   * the client maps — called whenever a fresh ledger page arrives. */
+  hydrateServerCaseState: (txns: Transaction[]) => void;
   toggleWatch: (txnId: string) => void;
   assignCase: (txnId: string, analystId: string | null) => void;
   /** Assigned analyst claims the case — audited; switches the acting persona unless keepPersona. */
   acceptCaseHandoff: (txnId: string, opts?: { keepPersona?: boolean }) => void;
   /** One-click SLA-breach escalation — reassigns to the L3 fraud lead (audited). */
   escalateCase: (txnId: string) => void;
-  addCaseNote: (txnId: string, text: string) => void;
+  /** Replaces the cached notebook for a case — entries come from the
+   * server (CaseNote table); the cache only makes exports/lists work
+   * between fetches. Persistence itself lives in the API layer. */
+  setCaseNotes: (txnId: string, notes: CaseNote[]) => void;
   setSignedInAnalyst: (analystId: string) => void;
   setDigestOpen: (open: boolean) => void;
   setDigestPrintOpen: (open: boolean) => void;
@@ -252,16 +265,8 @@ export const useAppStore = create<AppState>()(
       };
     }),
 
-  addCaseNote: (txnId, text) =>
-    set((s) => {
-      const note: CaseNote = {
-        id: `note_${Date.now().toString(36)}`,
-        text,
-        analystId: s.signedInAnalystId,
-        at: new Date().toISOString(),
-      };
-      return { caseNotes: { ...s.caseNotes, [txnId]: [...(s.caseNotes[txnId] ?? []), note] } };
-    }),
+  setCaseNotes: (txnId, notes) =>
+    set((s) => ({ caseNotes: { ...s.caseNotes, [txnId]: notes } })),
 
   setSignedInAnalyst: (signedInAnalystId) => set({ signedInAnalystId }),
 
@@ -281,17 +286,10 @@ export const useAppStore = create<AppState>()(
     set((s) => ({ phases: { ...s.phases, [txnId]: phase } })),
 
   resolveAction: (txnId, action, note) => {
-    /* Persist the decision server-side first-class: the PATCH audited
-     * route records it in the SQLite audit trail. Fire-and-forget — the
-     * UI stays optimistic, and polling reconciles when the server row
-     * catches up (decided rows keep local status in the merge). */
-    void fetch(`/api/transactions/${txnId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ decision: action, note, analystId: useAppStore.getState().signedInAnalystId }),
-    }).catch(() => {
-      /* offline — the decision stays local and syncs on next explicit action */
-    });
+    /* LOCAL application only — called AFTER the server confirms the
+     * decision (PATCH /api/transactions/:id). Persistence lives in the
+     * caller (ActionPanel → useRecordDecision) so a failed write never
+     * shows a decision the database does not have. */
     return set((s) => ({
       decisions: {
         ...s.decisions,
@@ -324,6 +322,29 @@ export const useAppStore = create<AppState>()(
   },
 
   markNotificationsRead: () => set({ unreadNotifications: 0 }),
+
+  /** Hydrates server-persisted handoffs (assigneeId/escalatedTo from the
+   * ledger rows) into the client maps — decisions survive browsers. */
+  hydrateServerCaseState: (txns) =>
+    set((s) => {
+      let assignments = s.assignments;
+      let escalations = s.escalations;
+      for (const t of txns) {
+        if (t.assigneeId && !assignments[t.id]) {
+          assignments = {
+            ...assignments,
+            [t.id]: { analystId: t.assigneeId, at: t.timestamp },
+          };
+        }
+        if (t.escalatedTo && !escalations[t.id]) {
+          escalations = {
+            ...escalations,
+            [t.id]: { at: t.timestamp, byAnalystId: "SYSTEM", toAnalystId: t.escalatedTo },
+          };
+        }
+      }
+      return { assignments, escalations };
+    }),
 
   updateTransaction: (txnId, patch) =>
     set((s) => ({

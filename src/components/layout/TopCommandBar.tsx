@@ -131,7 +131,8 @@ export function TopCommandBar({ onOpenMobileNav }: { onOpenMobileNav: () => void
             <TooltipContent side="bottom">Risk engine rse-1.2 · p99 latency 18ms</TooltipContent>
           </Tooltip>
 
-          {/* AI investigator mode — live LLM or deterministic heuristics */}
+          {/* AI investigator mode — live LLM or deterministic heuristics,
+              with the honest Saved/Verified distinction visible everywhere */}
           <Tooltip>
             <TooltipTrigger asChild>
               <button
@@ -139,24 +140,32 @@ export function TopCommandBar({ onOpenMobileNav }: { onOpenMobileNav: () => void
                 className={cn(
                   "flex h-8 shrink-0 items-center gap-2 rounded-sm border px-2.5 transition-colors",
                   llmStatus?.configured
-                    ? "border-intel/45 bg-intel/10 text-intel hover:bg-intel/15"
+                    ? llmStatus.verification?.state === "verified"
+                      ? "border-intel/45 bg-intel/10 text-intel hover:bg-intel/15"
+                      : "border-risk-medium/40 bg-risk-medium/8 text-risk-medium hover:bg-risk-medium/12"
                     : "border-line bg-surface-1 text-slate-400 hover:border-line-strong hover:text-slate-200"
                 )}
                 aria-label={
                   llmStatus?.configured
-                    ? `AI investigator live on ${llmStatus.model || llmStatus.baseUrl} — open AI settings`
+                    ? `AI investigator live on ${llmStatus.model || llmStatus.baseUrl}${llmStatus.verification?.state === "verified" ? " (connection verified)" : " (saved, not yet verified)"} — open AI settings`
                     : "AI investigator running on deterministic heuristics — connect an LLM"
                 }
               >
                 <Sparkles className="h-3.5 w-3.5" aria-hidden />
                 <span className="micro hidden whitespace-nowrap sm:inline">
-                  {llmStatus?.configured ? `AI: ${llmStatus.model || "live"}` : "AI: heuristics"}
+                  {llmStatus?.configured
+                    ? llmStatus.verification?.state === "verified"
+                      ? `AI: ${llmStatus.model || "live"} ✓`
+                      : `AI: ${llmStatus.model || "live"} (unverified)`
+                    : "AI: heuristics"}
                 </span>
               </button>
             </TooltipTrigger>
             <TooltipContent side="bottom">
               {llmStatus?.configured
-                ? `Investigator is live (${llmStatus.source === "env" ? ".env" : "in-app config"}) — click to manage`
+                ? llmStatus.verification?.state === "verified"
+                  ? `Investigator verified by a live probe (${llmStatus.source === "env" ? ".env" : "in-app config"}) — click to manage`
+                  : `Endpoint saved but NOT yet verified by a live probe — click to test it`
                 : "No LLM connected — heuristics answer every case. Click to connect one."}
             </TooltipContent>
           </Tooltip>

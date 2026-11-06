@@ -2,7 +2,10 @@
 
 /**
  * INVESTIGATION ACTIONS — bounded actions with real weight.
- * BLOCK opens a confirmation modal that restates the case before locking it in.
+ * BLOCK opens a confirmation modal that restates the case before locking
+ * it in. Decisions are written THROUGH the API first: the UI only shows
+ * "decision recorded" after the server confirms the SQLite write — a
+ * failed save surfaces as an error, never as a fake success.
  */
 
 import { useState } from "react";
@@ -11,6 +14,7 @@ import {
   Ban,
   CheckCircle2,
   Eye,
+  Loader2,
   Lock,
   PauseCircle,
 } from "lucide-react";
@@ -25,6 +29,8 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/store/appStore";
+import { useRecordDecision } from "@/hooks/useLedger";
+import { useToast } from "@/hooks/use-toast";
 import { ANALYSTS } from "@/data/mockData";
 import { formatINR } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -49,8 +55,12 @@ export function ActionPanel({
   const resolveAction = useAppStore((s) => s.resolveAction);
   const signedInId = useAppStore((s) => s.signedInAnalystId);
   const signedIn = ANALYSTS.find((a) => a.id === signedInId) ?? ANALYSTS[0];
+  const recordDecision = useRecordDecision();
+  const { toast } = useToast();
   const [pending, setPending] = useState<RiskAction | null>(null);
   const [note, setNote] = useState("");
+  const [savingDecision, setSavingDecision] = useState(false);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
   const resolved = investigation?.analystAction;
   const resolvedBy = useAppStore((s) => {
     const d = s.decisions[txn.id];
@@ -65,13 +75,38 @@ export function ActionPanel({
       setNote("");
       return;
     }
-    commit(a);
+    void commit(a);
   };
 
-  const commit = (a: RiskAction) => {
-    resolveAction(txn.id, a, note.trim() || undefined);
-    setPending(null);
-    setNote("");
+  /** SERVER-CONFIRMED: the PATCH must succeed before the UI records the
+   * decision. On failure the modal stays open with the reason. */
+  const commit = async (a: RiskAction) => {
+    if (savingDecision) return;
+    setSavingDecision(true);
+    setDecisionError(null);
+    try {
+      await recordDecision.mutateAsync({
+        txnId: txn.id,
+        decision: a,
+        note: note.trim() || undefined,
+        analystId: signedInId,
+      });
+      resolveAction(txn.id, a, note.trim() || undefined);
+      setPending(null);
+      setNote("");
+      toast({
+        title: `${a} recorded — persisted to the ledger`,
+        description: `${txn.id} · decision, note and audit event are now stored in SQLite and survive reloads.`,
+      });
+    } catch (err) {
+      setDecisionError(
+        err instanceof Error && err.message
+          ? err.message
+          : "The database write failed — the decision was NOT saved. Try again.",
+      );
+    } finally {
+      setSavingDecision(false);
+    }
   };
 
   return (
@@ -110,7 +145,7 @@ export function ActionPanel({
                 return (
                   <button
                     key={a.key}
-                    disabled={analyzing}
+                    disabled={analyzing || savingDecision}
                     onClick={() => act(a.key)}
                     className={cn(
                       "flex h-12 items-center justify-center gap-2 rounded-sm border bg-surface-1 text-[12.5px] font-semibold tracking-wide transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40",
@@ -203,17 +238,23 @@ export function ActionPanel({
           </div>
 
           <DialogFooter className="gap-2 sm:gap-0">
-            <Button variant="ghost" onClick={() => setPending(null)} className="text-slate-400 hover:bg-surface-2 hover:text-slate-200">
+            <Button variant="ghost" onClick={() => setPending(null)} disabled={savingDecision} className="text-slate-400 hover:bg-surface-2 hover:text-slate-200">
               Cancel
             </Button>
             <Button
-              onClick={() => pending && commit(pending)}
+              onClick={() => pending && void commit(pending)}
+              disabled={savingDecision}
               className="gap-2 bg-risk-critical text-white hover:bg-risk-critical/85 focus-visible:ring-risk-critical/50"
             >
-              <Ban className="h-3.5 w-3.5" aria-hidden />
-              Confirm {pending}
+              {savingDecision ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Ban className="h-3.5 w-3.5" aria-hidden />}
+              {savingDecision ? "Saving to ledger…" : `Confirm ${pending}`}
             </Button>
           </DialogFooter>
+          {decisionError && (
+            <p role="alert" className="rounded-sm border border-risk-critical/45 bg-risk-critical/8 px-3 py-2 text-[11.5px] leading-snug text-risk-critical">
+              {decisionError}
+            </p>
+          )}
         </DialogContent>
       </Dialog>
     </section>

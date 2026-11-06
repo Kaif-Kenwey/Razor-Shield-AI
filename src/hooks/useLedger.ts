@@ -58,10 +58,10 @@ function buildMetricCards(m: api.RiskMetricsResponse): RiskMetric[] {
     },
     {
       key: "fraudExposure",
-      label: "Fraud exposure (₹)",
-      value: t.fraudExposure,
+      label: "Flagged value (₹k)",
+      value: t.flaggedValue,
       tone: "critical",
-      hint: "Total rupee value of high-risk and critical payments currently stored.",
+      hint: `Rupee value of payments the engine scored HIGH or CRITICAL (score ≥ ${t.flaggedThreshold} enters the review flow). Flagged ≠ confirmed fraud — the value is potential exposure until an analyst decides.`,
     },
   ].map((card, i) => ({
     ...card,
@@ -73,8 +73,8 @@ function buildMetricCards(m: api.RiskMetricsResponse): RiskMetric[] {
         : card.key === "highRisk"
           ? `· ${t.critical} critical`
           : card.key === "pendingInvestigations"
-            ? `· ${m.queue.investigating} investigating`
-            : `· ₹${Math.round(t.fraudExposure / 1000)}k total`,
+            ? `· ${m.queue.investigating} investigating · ${m.queue.resolvedToday} resolved 24h`
+            : `· ₹${Math.round(t.flaggedValue / 1000)}k total`,
     // attach per-card sparkline data from the real volume buckets
     ...(i === 0 ? { spark: counts } : i === 1 ? { spark: flaggedCounts } : i === 3 ? { spark: valueBuckets } : {}),
   })) as RiskMetric[];
@@ -192,6 +192,62 @@ export function useRecordDecision() {
       void qc.invalidateQueries({ queryKey: ["ledger"] });
       void qc.invalidateQueries({ queryKey: qk.metrics });
       void qc.invalidateQueries({ queryKey: ["audit"] });
+      void qc.invalidateQueries({ queryKey: ["transaction-detail"] });
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Case notes — server-persisted analyst notebook                      */
+/* ------------------------------------------------------------------ */
+
+export function useCaseNotes(txnId: string | null) {
+  return useQuery({
+    queryKey: ["case-notes", txnId ?? "none"],
+    queryFn: () => api.getCaseNotes(txnId as string),
+    enabled: Boolean(txnId),
+    staleTime: 5_000,
+  });
+}
+
+export function useAddCaseNote(txnId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ text, analystId }: { text: string; analystId: string }) =>
+      api.addCaseNote(txnId, text, analystId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["case-notes", txnId] });
+      void qc.invalidateQueries({ queryKey: ["audit"] });
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Assignments & escalations — server-persisted, audited               */
+/* ------------------------------------------------------------------ */
+
+export function useRecordAssignment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ txnId, assignee, analystId }: { txnId: string; assignee: string | null; analystId?: string }) =>
+      api.recordAssignment(txnId, assignee, analystId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["ledger"] });
+      void qc.invalidateQueries({ queryKey: ["audit"] });
+      void qc.invalidateQueries({ queryKey: ["transaction-detail"] });
+    },
+  });
+}
+
+export function useRecordEscalation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ txnId, escalateTo, analystId }: { txnId: string; escalateTo: string; analystId?: string }) =>
+      api.recordEscalation(txnId, escalateTo, analystId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["ledger"] });
+      void qc.invalidateQueries({ queryKey: ["audit"] });
+      void qc.invalidateQueries({ queryKey: ["transaction-detail"] });
     },
   });
 }

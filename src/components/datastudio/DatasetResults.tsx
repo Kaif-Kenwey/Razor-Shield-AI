@@ -251,6 +251,8 @@ export function DatasetResults({
   const [expanded, setExpanded] = useState<number | null>(null);
   const [routed, setRouted] = useState(false);
   const [importedToLedger, setImportedToLedger] = useState(false);
+  /** Chunked-import progress — null when no import is running. */
+  const [importProgress, setImportProgress] = useState<{ done: number; total: number } | null>(null);
 
   const m = analysis.metrics;
 
@@ -293,32 +295,56 @@ export function DatasetResults({
     setTimeout(() => navigate("investigations"), 700);
   };
 
-  /** Push every mapped row into the SQLite ledger — each one is re-scored
-   * server-side against the customer's stored history (not the file's
-   * batch baselines). Duplicates are reported, never silently dropped. */
+  /** Push every mapped row into the SQLite ledger — CHUNKED with visible
+   * progress, sent chronologically (server re-sorts within each chunk;
+   * each row is re-scored against only the history that existed at its
+   * own timestamp). Duplicates/ failures accumulate across chunks. */
   const importToLedger = async () => {
-    try {
-      const result = await importRows.mutateAsync({
-        datasetName: analysis.name,
-        rows: analysis.rows.map((r) => ({
-          txnId: r.txnId,
-          amount: r.amount,
-          timestamp: r.timestamp ?? undefined,
-          customerId: r.customerId,
-          customerName: r.customerName || undefined,
-          merchant: r.merchant || undefined,
-          location: r.location || undefined,
-          device: r.device || undefined,
-          paymentMethod: r.paymentMethod || undefined,
-          label: r.label,
-        })),
+    const CHUNK = 250;
+    const all = analysis.rows
+      .map((r) => ({
+        txnId: r.txnId,
+        amount: r.amount,
+        timestamp: r.timestamp ?? undefined,
+        customerId: r.customerId,
+        customerName: r.customerName || undefined,
+        merchant: r.merchant || undefined,
+        location: r.location || undefined,
+        device: r.device || undefined,
+        paymentMethod: r.paymentMethod || undefined,
+        label: r.label,
+      }))
+      .sort((a, b) => {
+        const ta = a.timestamp ? new Date(a.timestamp).getTime() : Infinity;
+        const tb = b.timestamp ? new Date(b.timestamp).getTime() : Infinity;
+        return ta - tb;
       });
+    const total = all.length;
+    const chunkTotal = Math.max(1, Math.ceil(total / CHUNK));
+    setImportProgress({ done: 0, total });
+    try {
+      let imported = 0;
+      const duplicates: string[] = [];
+      const failed: { txnId: string; error: string }[] = [];
+      for (let i = 0; i < total; i += CHUNK) {
+        const chunk = all.slice(i, i + CHUNK);
+        const result = await importRows.mutateAsync({
+          datasetName: analysis.name,
+          rows: chunk,
+          chunkIndex: Math.floor(i / CHUNK) + 1,
+          chunkTotal,
+        });
+        imported += result.imported;
+        duplicates.push(...result.duplicates);
+        failed.push(...result.failed);
+        setImportProgress({ done: Math.min(i + CHUNK, total), total });
+      }
       setImportedToLedger(true);
       toast({
-        title: `Imported ${result.imported} rows to the ledger`,
+        title: `Imported ${imported} rows to the ledger`,
         description: [
-          result.duplicates.length ? `${result.duplicates.length} duplicates skipped` : null,
-          result.failed.length ? `${result.failed.length} failed` : null,
+          duplicates.length ? `${duplicates.length} duplicates skipped` : null,
+          failed.length ? `${failed.length} failed` : null,
           "Dashboard and customer stats now reflect these rows.",
         ]
           .filter(Boolean)
@@ -330,6 +356,8 @@ export function DatasetResults({
         description: err instanceof Error ? err.message : "Could not reach the import endpoint.",
         variant: "destructive",
       });
+    } finally {
+      setImportProgress(null);
     }
   };
 
@@ -379,16 +407,31 @@ export function DatasetResults({
             variant="outline"
             size="sm"
             className="gap-1.5"
-            disabled={importedToLedger || importRows.isPending}
+            disabled={importedToLedger || importRows.isPending || Boolean(importProgress)}
             onClick={() => void importToLedger()}
           >
             <DatabaseZap className="h-3.5 w-3.5" aria-hidden />
-            {importRows.isPending
-              ? "Importing…"
-              : importedToLedger
-                ? "In ledger ✓"
-                : `Import ${analysis.rowCount} rows to ledger`}
+            {importProgress
+              ? `Importing ${importProgress.done}/${importProgress.total}…`
+              : importRows.isPending
+                ? "Importing…"
+                : importedToLedger
+                  ? "In ledger ✓"
+                  : `Import ${analysis.rowCount} rows to ledger`}
           </Button>
+          {importProgress && (
+            <div className="w-40" role="progressbar" aria-valuenow={importProgress.done} aria-valuemin={0} aria-valuemax={importProgress.total}>
+              <div className="h-1.5 overflow-hidden rounded-full bg-surface-3">
+                <div
+                  className="h-full rounded-full bg-intel transition-all duration-300"
+                  style={{ width: `${Math.round((importProgress.done / Math.max(1, importProgress.total)) * 100)}%` }}
+                />
+              </div>
+              <p className="num mt-1 text-right text-[9.5px] text-slate-500">
+                {Math.round((importProgress.done / Math.max(1, importProgress.total)) * 100)}% · scored per row in order
+              </p>
+            </div>
+          )}
           <Button
             variant="outline"
             size="sm"

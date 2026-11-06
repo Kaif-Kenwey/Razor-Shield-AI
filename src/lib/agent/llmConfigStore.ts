@@ -7,18 +7,122 @@
  * db/llm-config.json — local to this machine, gitignored, and never sent
  * to the browser. Runtime config wins over env; when neither exists the
  * deterministic heuristic investigator answers (the UI labels the mode).
+ *
+ * SECURITY (review fix): API keys are no longer stored in plaintext.
+ * Every write encrypts the key with AES-256-GCM; the encryption key
+ * comes from LLM_CONFIG_SECRET when set, otherwise from a per-machine
+ * random secret persisted to db/.llm-secret with 0600 permissions. The
+ * ciphertext is tagged (authenticated) — a tampered config file fails to
+ * decrypt and is treated as absent rather than trusted. Legacy plaintext
+ * configs written by earlier builds still load (so an operator upgrade
+ * never breaks), and are re-encrypted on the next save.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
+import { randomBytes, createHash, createCipheriv, createDecipheriv } from "crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, openSync, closeSync } from "fs";
 import path from "path";
 import type { LlmConfig } from "./llm";
 
-const CONFIG_PATH = path.join(process.cwd(), "db", "llm-config.json");
+const CONFIG_DIR = path.join(process.cwd(), "db");
+const CONFIG_PATH = path.join(CONFIG_DIR, "llm-config.json");
+const SECRET_PATH = path.join(CONFIG_DIR, ".llm-secret");
 
 export const LLM_CONFIG_PATH = CONFIG_PATH;
 
-/** Structurally identical to LlmConfig — safe to hand to the client. */
-export type RuntimeLlmConfig = LlmConfig;
+/** Prefix marking an AES-256-GCM encrypted key inside the config file. */
+const ENC_PREFIX = "enc:v1:";
+
+interface StoredConfig {
+  version: 2;
+  baseUrl: string;
+  apiKey: string; // ENC_PREFIX + iv.tag.ciphertext (hex) — or legacy plaintext
+  model: string;
+  extraHeaders: Record<string, string>;
+  provider?: string;
+  routing?: string;
+  /** Last successful live-verification (probe) of this config. */
+  verifiedAt?: string;
+  verifiedModel?: string;
+  savedAt?: string;
+}
+
+/** Structurally identical to LlmConfig plus verification metadata — safe to describe to the client (key never included). */
+export type RuntimeLlmConfig = LlmConfig & {
+  verifiedAt?: string;
+  verifiedModel?: string;
+  savedAt?: string;
+};
+
+/* ------------------------------------------------------------------ */
+/* Encryption key management                                           */
+/* ------------------------------------------------------------------ */
+
+let cachedKey: Buffer | null = null;
+
+function encryptionKey(): Buffer {
+  if (cachedKey) return cachedKey;
+  const envSecret = process.env.LLM_CONFIG_SECRET?.trim();
+  if (envSecret) {
+    // Any passphrase works — stretch to exactly 32 bytes for AES-256.
+    cachedKey = createHash("sha256").update(`razorshield:llm:${envSecret}`).digest();
+    return cachedKey;
+  }
+  // No env secret: use (or create) a per-machine random secret file.
+  try {
+    if (existsSync(SECRET_PATH)) {
+      const material = readFileSync(SECRET_PATH, "utf8").trim();
+      if (material.length >= 32) {
+        cachedKey = createHash("sha256").update(`razorshield:llm:${material}`).digest();
+        return cachedKey;
+      }
+    }
+    const material = randomBytes(32).toString("hex");
+    mkdirSync(CONFIG_DIR, { recursive: true });
+    const fd = openSync(SECRET_PATH, "w", 0o600);
+    writeFileSync(fd, material + "\n", "utf8");
+    closeSync(fd);
+    try {
+      chmodSync(SECRET_PATH, 0o600);
+    } catch {
+      /* best effort on platforms without chmod */
+    }
+    cachedKey = createHash("sha256").update(`razorshield:llm:${material}`).digest();
+    return cachedKey;
+  } catch {
+    // Fall through to ephemeral key: encryption still works this process,
+    // but the next process rotation re-encrypts on the next save.
+    cachedKey = createHash("sha256").update(randomBytes(32)).digest();
+    return cachedKey;
+  }
+}
+
+function encryptKey(plain: string): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv, { authTagLength: 16 });
+  const ct = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${ENC_PREFIX}${iv.toString("hex")}.${tag.toString("hex")}.${ct.toString("hex")}`;
+}
+
+function decryptKey(stored: string): string {
+  if (!stored.startsWith(ENC_PREFIX)) return stored; // legacy plaintext — re-encrypted on next save
+  try {
+    const [ivHex, tagHex, ctHex] = stored.slice(ENC_PREFIX.length).split(".");
+    if (!ivHex || !tagHex || !ctHex) return "";
+    const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(ivHex, "hex"), { authTagLength: 16 });
+    decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+    const plain = Buffer.concat([decipher.update(Buffer.from(ctHex, "hex")), decipher.final()]);
+    return plain.toString("utf8");
+  } catch {
+    // Tampered file or rotated secret — treat the key as absent instead
+    // of trusting unauthenticated bytes.
+    return "";
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Read / write                                                        */
+/* ------------------------------------------------------------------ */
 
 /** Reads the runtime config saved from the UI, or null when absent/invalid. */
 export function readRuntimeLlmConfig(): RuntimeLlmConfig | null {
@@ -27,7 +131,7 @@ export function readRuntimeLlmConfig(): RuntimeLlmConfig | null {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     const p = parsed as Record<string, unknown>;
     const baseUrl = typeof p.baseUrl === "string" ? p.baseUrl.trim().replace(/\/+$/, "") : "";
-    const apiKey = typeof p.apiKey === "string" ? p.apiKey.trim() : "";
+    const apiKey = decryptKey(typeof p.apiKey === "string" ? p.apiKey.trim() : "");
     if (!baseUrl || !apiKey) return null;
 
     let extraHeaders: Record<string, string> = {};
@@ -46,6 +150,9 @@ export function readRuntimeLlmConfig(): RuntimeLlmConfig | null {
       extraHeaders,
       provider: typeof p.provider === "string" && p.provider.trim() ? p.provider.trim() : "custom",
       routing: typeof p.routing === "string" && p.routing.trim() ? p.routing.trim() : undefined,
+      verifiedAt: typeof p.verifiedAt === "string" ? p.verifiedAt : undefined,
+      verifiedModel: typeof p.verifiedModel === "string" ? p.verifiedModel : undefined,
+      savedAt: typeof p.savedAt === "string" ? p.savedAt : undefined,
     };
   } catch {
     // Missing/unreadable file = no runtime config; env (or heuristics) applies.
@@ -53,10 +160,72 @@ export function readRuntimeLlmConfig(): RuntimeLlmConfig | null {
   }
 }
 
-/** Persists the runtime config (null clears it). Atomic-ish via tmp+rename. */
+/** Persists the runtime config (null clears it). Atomic-ish via tmp+rename; key encrypted at rest, file 0600. */
 export function writeRuntimeLlmConfig(cfg: RuntimeLlmConfig | null): void {
-  mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  if (cfg === null) {
+    try {
+      if (existsSync(CONFIG_PATH)) unlinkSync(CONFIG_PATH);
+    } catch {
+      /* best effort */
+    }
+    return;
+  }
+
+  const stored: StoredConfig = {
+    version: 2,
+    baseUrl: cfg.baseUrl,
+    apiKey: encryptKey(cfg.apiKey),
+    model: cfg.model,
+    extraHeaders: cfg.extraHeaders,
+    provider: cfg.provider,
+    routing: cfg.routing,
+    verifiedAt: cfg.verifiedAt,
+    verifiedModel: cfg.verifiedModel,
+    savedAt: cfg.savedAt ?? new Date().toISOString(),
+  };
   const tmp = `${CONFIG_PATH}.tmp`;
-  writeFileSync(tmp, JSON.stringify(cfg, null, 2), "utf8");
+  const fd = openSync(tmp, "w", 0o600);
+  writeFileSync(fd, JSON.stringify(stored, null, 2), "utf8");
+  closeSync(fd);
+  try {
+    chmodSync(tmp, 0o600);
+  } catch {
+    /* best effort */
+  }
   renameSync(tmp, CONFIG_PATH);
+}
+
+/**
+ * Returns the saved API key when the caller is re-saving the SAME
+ * provider + endpoint (model/header changes must not require retyping
+ * the key). Undefined when there is nothing to reuse — the caller then
+ * requires a key as usual. The key never leaves this module.
+ */
+export function reusableSavedKey(provider: string | undefined, baseUrl: string): string | undefined {
+  const saved = readRuntimeLlmConfig();
+  if (!saved) return undefined;
+  const sameProvider = provider !== undefined && saved.provider === provider;
+  const sameEndpoint = saved.baseUrl.replace(/\/+$/, "") === baseUrl.replace(/\/+$/, "");
+  if ((sameProvider && sameEndpoint) || sameEndpoint) return saved.apiKey;
+  return undefined;
+}
+
+/** Records a successful live verification against the saved config. */
+export function markRuntimeConfigVerified(model: string): void {
+  const saved = readRuntimeLlmConfig();
+  if (!saved) return;
+  writeRuntimeLlmConfig({
+    ...saved,
+    verifiedAt: new Date().toISOString(),
+    verifiedModel: model,
+    savedAt: saved.savedAt,
+  });
+}
+
+/** True when the saved config has been live-verified with the current endpoint + model. */
+export function runtimeConfigVerified(): { verifiedAt: string; verifiedModel: string } | null {
+  const saved = readRuntimeLlmConfig();
+  if (!saved?.verifiedAt) return null;
+  return { verifiedAt: saved.verifiedAt, verifiedModel: saved.verifiedModel ?? "" };
 }
