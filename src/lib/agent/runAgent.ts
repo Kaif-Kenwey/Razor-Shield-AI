@@ -15,9 +15,7 @@
 
 import type { Investigation, Transaction } from "@/types";
 import { useAppStore } from "@/store/appStore";
-import { buildInvestigation, customerFor } from "@/data/mockData";
-import { similarTransactionsFor } from "@/lib/similarCases";
-import type { AgentCaseContext } from "./investigator";
+import { buildInvestigation } from "@/data/mockData";
 
 /* ------------------------------------------------------------------ */
 /* Heuristic conclusion (fallback + render-time derivation)            */
@@ -76,58 +74,6 @@ export function heuristicInvestigation(txn: Transaction): Investigation {
 }
 
 /* ------------------------------------------------------------------ */
-/* Agent context assembly                                              */
-/* ------------------------------------------------------------------ */
-
-export function buildAgentContext(txn: Transaction): AgentCaseContext {
-  const c = customerFor(txn);
-  const store = useAppStore.getState();
-  /* Real precedent recall: feature-vector similarity over the loaded
-   * universe, with analyst-adjudicated outcomes where they exist. */
-  const { hits } = similarTransactionsFor(txn, store.transactions, { decisions: store.decisions });
-  return {
-    transaction: {
-      id: txn.id,
-      amount: txn.amount,
-      currency: txn.currency,
-      merchant: txn.merchant,
-      location: txn.location,
-      device: txn.device,
-      paymentMethod: txn.paymentMethod,
-      timestamp: txn.timestamp,
-    },
-    riskScore: txn.riskScore,
-    riskLevel: txn.riskLevel,
-    signals: txn.signals.map((s) => ({
-      type: s.type,
-      title: s.title,
-      evidence: s.evidence,
-      severity: s.severity,
-      impact: s.impact,
-    })),
-    customer: {
-      id: c.id,
-      name: c.name,
-      accountAge: c.accountAge,
-      transactionCount: c.transactionCount,
-      avgTransaction: c.avgTransaction,
-      previousIncidents: c.previousIncidents,
-      usualLocation: c.usualLocation,
-      usualDevice: c.usualDevice,
-    },
-    similarCases: hits.map((h) => ({
-      id: h.txn.id,
-      similarity: h.similarity / 100,
-      outcome: h.outcome
-        ? h.outcome === "FRAUD_CONFIRMED"
-          ? "confirmed fraud (analyst-blocked)"
-          : "legitimate (analyst-cleared)"
-        : `unadjudicated · engine score ${h.txn.riskScore}/100`,
-    })),
-  };
-}
-
-/* ------------------------------------------------------------------ */
 /* The runner                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -171,10 +117,13 @@ export async function runAgentInvestigation(
     let mode: InvestigationMode = "heuristic";
 
     try {
+      /* SECURITY: the client sends ONLY the transaction id. The server
+       * loads the case facts from SQLite itself — a tampered request
+       * cannot influence what the investigation engine sees. */
       const res = await fetch("/api/investigate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ context: buildAgentContext(txn) }),
+        body: JSON.stringify({ transactionId: txnId }),
         signal: AbortSignal.timeout(24_000),
       });
       if (res.ok) {

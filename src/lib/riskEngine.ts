@@ -2,17 +2,28 @@
  * RazorShield AI — deterministic batch risk engine (rse-1.2).
  *
  * Pure TypeScript: no DOM, no Node APIs, no I/O. Used by the Dataset Studio
- * API route to score uploaded payment records and to compute honest quality
- * metrics when the file carries ground-truth fraud labels.
+ * API route, the server scoring service (manual entry, CSV import, demo
+ * generator) and the attack simulator.
  *
  * Design notes
  * ------------
+ * - CAUSAL SCORING (review fix): every record is scored against ONLY the
+ *   context that existed before it. Rows are processed in chronological
+ *   order (ties broken by upload index) and each row's customer profile
+ *   and portfolio baselines are built from strictly earlier rows — a
+ *   future payment can never leak backwards into an earlier one's
+ *   velocity, baselines or "usual" corridor. Records without a parsable
+ *   timestamp are scored after all dated rows (no time axis — the whole
+ *   dated context is used) and flagged accordingly upstream.
+ * - This makes Dataset Studio batch scoring and the ledger's
+ *   chronological ingestion agree: the same rows, processed under the
+ *   same conditions, produce the same scores.
  * - Every signal is a rule with an evidence sentence and structured facts,
  *   so an analyst can always ask "why this score?" and get an answer.
  * - Customer-relative signals (unusual amount, location drift, velocity,
- *   impossible travel) only fire when the customer has enough history in the
- *   file. A single-transaction customer never triggers them — that avoids
- *   false precision the data cannot support.
+ *   impossible travel) only fire when the customer has at least 3 PRIOR
+ *   transactions. A single-transaction customer never triggers them —
+ *   that avoids false precision the data cannot support.
  * - Scoring is capped at 100 and signal impacts sum to the composite score.
  */
 
@@ -61,132 +72,82 @@ export interface EngineInput {
 /* Statistics helpers                                                  */
 /* ------------------------------------------------------------------ */
 
-function median(values: number[]): number {
-  if (!values.length) return 0;
-  const s = [...values].sort((a, b) => a - b);
-  const mid = s.length >> 1;
-  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+function medianSorted(sorted: number[]): number {
+  if (!sorted.length) return 0;
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-function percentile(values: number[], p: number): number {
-  if (!values.length) return 0;
-  const s = [...values].sort((a, b) => a - b);
-  const idx = Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1));
-  return s[idx];
+function percentileSorted(sorted: number[], p: number): number {
+  if (!sorted.length) return 0;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[idx];
 }
 
-function mode(values: string[]): string {
-  const counts = new Map<string, number>();
-  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+function insertSorted(arr: number[], v: number): void {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < v) lo = mid + 1;
+    else hi = mid;
+  }
+  arr.splice(lo, 0, v);
+}
+
+function bump(map: Map<string, number>, key: string): void {
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+function modeFromCounts(map: Map<string, number>): { value: string; count: number } {
   let best = "";
   let bestN = 0;
-  for (const [v, n] of counts) {
+  for (const [v, n] of map) {
     if (n > bestN) {
       best = v;
       bestN = n;
     }
   }
-  return best;
-}
-
-function modeCount(values: string[]): number {
-  const m = mode(values);
-  return m ? values.filter((v) => v === m).length : 0;
+  return { value: best, count: bestN };
 }
 
 const HOUR = 60 * 60 * 1000;
 
-/** Per-customer aggregates used by the relative rules. */
-interface CustomerProfile {
-  ids: string[];
-  amounts: number[];
-  medianAmount: number;
-  locations: string[];
-  devices: string[];
-  methods: string[];
+/* ------------------------------------------------------------------ */
+/* Running scoring context (strictly-prior rows only)                  */
+/* ------------------------------------------------------------------ */
+
+interface RunningCustomer {
+  amounts: number[]; // ascending
+  locations: Map<string, number>;
+  devices: Map<string, number>;
+  methods: Map<string, number>;
+  /** Prior timed rows for this customer, ascending by time. */
+  timed: { at: number; location: string }[];
+  count: number;
+}
+
+function emptyCustomer(): RunningCustomer {
+  return { amounts: [], locations: new Map(), devices: new Map(), methods: new Map(), timed: [], count: 0 };
+}
+
+/** Everything scoreRow is allowed to know about the world for ONE record. */
+interface RowContext {
+  /** Customer transactions strictly BEFORE this record. */
+  priorCount: number;
+  priorMedianAmount: number;
   usualLocation: string;
   usualLocationCount: number;
   usualDevice: string;
   usualMethod: string;
-  /** Customer's own records ordered by time (when timestamps exist). */
-  timed: { index: number; at: number; location: string }[];
-}
-
-interface DatasetStats {
-  rows: EngineInput[];
-  medianAmount: number;
-  p95Amount: number;
-  customers: Map<string, CustomerProfile>;
-  deviceFirstUse: Map<string, number>;
-  /** Median amount per merchant — merchant-outlier rule. */
-  merchantMedian: Map<string, number>;
-  /** How many transactions carry a parsable timestamp. */
-  timedCount: number;
-}
-
-export function computeStats(rows: EngineInput[]): DatasetStats {
-  const amounts = rows.map((r) => r.amount);
-  const customers = new Map<string, CustomerProfile>();
-  const deviceUse = new Map<string, number>();
-  const merchantAmounts = new Map<string, number[]>();
-
-  for (const r of rows) {
-    let cp = customers.get(r.customerId);
-    if (!cp) {
-      cp = {
-        ids: [],
-        amounts: [],
-        medianAmount: 0,
-        locations: [],
-        devices: [],
-        methods: [],
-        usualLocation: "",
-        usualLocationCount: 0,
-        usualDevice: "",
-        usualMethod: "",
-        timed: [],
-      };
-      customers.set(r.customerId, cp);
-    }
-    cp.ids.push(r.txnId);
-    cp.amounts.push(r.amount);
-    cp.locations.push(r.location);
-    cp.devices.push(r.device);
-    cp.methods.push(r.paymentMethod);
-    if (r.at !== null) cp.timed.push({ index: r.index, at: r.at, location: r.location });
-    deviceUse.set(r.device, (deviceUse.get(r.device) ?? 0) + 1);
-
-    const ma = merchantAmounts.get(r.merchant) ?? [];
-    ma.push(r.amount);
-    merchantAmounts.set(r.merchant, ma);
-  }
-
-  const merchantMedian = new Map<string, number>();
-  for (const [m, vals] of merchantAmounts) merchantMedian.set(m, median(vals));
-
-  for (const cp of customers.values()) {
-    cp.medianAmount = median(cp.amounts);
-    cp.usualLocation = mode(cp.locations);
-    cp.usualLocationCount = cp.usualLocation
-      ? cp.locations.filter((v) => v === cp!.usualLocation).length
-      : 0;
-    cp.usualDevice = mode(cp.devices);
-    cp.usualMethod = mode(cp.methods);
-    cp.timed.sort((a, b) => a.at - b.at);
-  }
-
-  const deviceFirstUse = new Map<string, number>();
-  for (const [device, n] of deviceUse) deviceFirstUse.set(device, n);
-
-  return {
-    rows,
-    medianAmount: median(amounts),
-    p95Amount: percentile(amounts, 95),
-    customers,
-    deviceFirstUse,
-    merchantMedian,
-    timedCount: rows.filter((r) => r.at !== null).length,
-  };
+  priorUsesOfThisDevice: number;
+  priorTimed: { at: number; location: string }[];
+  /** Portfolio baselines over all rows scored before this one. */
+  portfolioMedian: number;
+  portfolioP95: number;
+  merchantMedian: number;
+  /** Portfolio-prior uses of this device — first-seen detection, causal. */
+  portfolioPriorDeviceUses: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -226,17 +187,15 @@ function hourOf(at: number | null): number | null {
 /* ------------------------------------------------------------------ */
 
 /**
- * Scores one record against the dataset statistics. Returns the composite
- * score (0–100), the fired signals and the recommended action.
+ * Scores one record against its strictly-prior context. Returns the
+ * composite score (0–100), the fired signals and the recommended action.
  */
-export function scoreRecord(rec: EngineInput, stats: DatasetStats): {
+function scoreRow(rec: EngineInput, ctx: RowContext): {
   score: number;
   signals: RiskSignal[];
   recommendation: RiskAction;
 } {
   const signals: RiskSignal[] = [];
-  const cp = stats.customers.get(rec.customerId);
-  const history = cp ? cp.ids.length : 0;
   const at = rec.at;
   const hour = hourOf(at);
 
@@ -252,7 +211,7 @@ export function scoreRecord(rec: EngineInput, stats: DatasetStats): {
         [
           { label: "Amount", value: inr(rec.amount) },
           { label: "Threshold", value: "₹1,00,000" },
-          { label: "Dataset median", value: inr(stats.medianAmount) },
+          { label: "Median to date", value: ctx.portfolioMedian ? inr(ctx.portfolioMedian) : "no prior data" },
         ],
       ),
     );
@@ -261,12 +220,12 @@ export function scoreRecord(rec: EngineInput, stats: DatasetStats): {
       signal(
         "HIGH_VALUE",
         "Elevated ticket size",
-        `${inr(rec.amount)} crosses the ₹50,000 review threshold (${(rec.amount / Math.max(stats.medianAmount, 1)).toFixed(1)}× the dataset median).`,
+        `${inr(rec.amount)} crosses the ₹50,000 review threshold (${(rec.amount / Math.max(ctx.portfolioMedian, 1)).toFixed(1)}× the median to date).`,
         "HIGH",
         WEIGHTS.highValue * 0.7,
         [
           { label: "Amount", value: inr(rec.amount) },
-          { label: "Dataset median", value: inr(stats.medianAmount) },
+          { label: "Median to date", value: ctx.portfolioMedian ? inr(ctx.portfolioMedian) : "no prior data" },
         ],
       ),
     );
@@ -293,51 +252,62 @@ export function scoreRecord(rec: EngineInput, stats: DatasetStats): {
     );
   }
 
-  /* --- customer-relative amount ---------------------------------- */
-  if (cp && history >= 3 && cp.medianAmount > 0 && rec.amount >= cp.medianAmount * 5) {
+  /* --- customer-relative amount (needs ≥3 PRIOR txns) ------------- */
+  if (ctx.priorCount >= 3 && ctx.priorMedianAmount > 0 && rec.amount >= ctx.priorMedianAmount * 5) {
     signals.push(
       signal(
         "UNUSUAL_AMOUNT",
         "Amount deviates from customer baseline",
-        `${inr(rec.amount)} is ${(rec.amount / cp.medianAmount).toFixed(1)}× this customer's median ticket of ${inr(cp.medianAmount)}.`,
-        rec.amount >= cp.medianAmount * 10 ? "HIGH" : "MEDIUM",
+        `${inr(rec.amount)} is ${(rec.amount / ctx.priorMedianAmount).toFixed(1)}× this customer's median ticket of ${inr(ctx.priorMedianAmount)} across ${ctx.priorCount} earlier transactions.`,
+        rec.amount >= ctx.priorMedianAmount * 10 ? "HIGH" : "MEDIUM",
         WEIGHTS.unusualAmount,
         [
-          { label: "Customer median", value: inr(cp.medianAmount) },
-          { label: "This txn", value: `${(rec.amount / cp.medianAmount).toFixed(1)}×` },
-          { label: "History", value: `${history} txns` },
+          { label: "Customer median (prior)", value: inr(ctx.priorMedianAmount) },
+          { label: "This txn", value: `${(rec.amount / ctx.priorMedianAmount).toFixed(1)}×` },
+          { label: "Prior txns", value: `${ctx.priorCount}` },
         ],
       ),
     );
   }
 
   /* --- velocity + impossible travel (needs timestamps) ------------ */
-  if (cp && at !== null && cp.timed.length >= 3) {
-    const window = cp.timed.filter((t) => Math.abs(t.at - at) <= 10 * 60 * 1000);
-    const peers = window.length;
-    if (peers >= 3) {
+  if (at !== null && ctx.priorTimed.length > 0) {
+    // Strictly earlier rows within the 10 minutes before this payment.
+    let peers = 0;
+    for (let i = ctx.priorTimed.length - 1; i >= 0; i--) {
+      const gap = at - ctx.priorTimed[i].at;
+      if (gap > 10 * 60 * 1000) break;
+      peers += 1;
+    }
+    if (peers >= 2) {
       signals.push(
         signal(
           "VELOCITY_SPIKE",
           "Velocity spike",
-          `${peers} transactions on this customer within a 10-minute window — burst behaviour consistent with card testing or scripted fraud.`,
-          peers >= 5 ? "CRITICAL" : "HIGH",
-          Math.min(WEIGHTS.velocity, 14 + (peers - 2) * 4),
+          `${peers} earlier transactions on this customer within the 10 minutes before this payment — burst behaviour consistent with card testing or scripted fraud.`,
+          peers >= 4 ? "CRITICAL" : "HIGH",
+          Math.min(WEIGHTS.velocity, 14 + (peers - 1) * 4),
           [
-            { label: "Txns / 10 min", value: String(peers) },
+            { label: "Earlier txns / 10 min", value: String(peers) },
             { label: "Customer", value: rec.customerName || rec.customerId },
           ],
         ),
       );
     }
 
-    const nearest = cp.timed
-      .filter((t) => t.index !== rec.index)
-      .map((t) => ({ ...t, gap: Math.abs(t.at - at) }))
-      .sort((a, b) => a.gap - b.gap)[0];
+    // Nearest PRIOR row within the past hour — travel must be possible
+    // forwards in time only; a later payment can never explain an earlier one.
+    let nearest: { at: number; location: string } | null = null;
+    for (let i = ctx.priorTimed.length - 1; i >= 0; i--) {
+      const gap = at - ctx.priorTimed[i].at;
+      if (gap <= HOUR) {
+        nearest = ctx.priorTimed[i];
+        break;
+      }
+      if (gap > 24 * HOUR) break; // nothing recent enough further back
+    }
     if (
       nearest &&
-      nearest.gap <= HOUR &&
       nearest.location &&
       rec.location &&
       nearest.location.toLowerCase() !== rec.location.toLowerCase()
@@ -346,13 +316,13 @@ export function scoreRecord(rec: EngineInput, stats: DatasetStats): {
         signal(
           "IMPOSSIBLE_TRAVEL",
           "Impossible travel",
-          `This payment is ${rec.location} while a transaction ${Math.round(nearest.gap / 60000)} min earlier/later is ${nearest.location} — the customer cannot be in both places.`,
+          `This payment is ${rec.location} while a transaction ${Math.max(1, Math.round((at - nearest.at) / 60000))} min earlier was ${nearest.location} — the customer cannot be in both places.`,
           "HIGH",
           WEIGHTS.impossibleTravel,
           [
             { label: "This location", value: rec.location },
-            { label: "Other location", value: nearest.location },
-            { label: "Gap", value: `${Math.round(nearest.gap / 60000)} min` },
+            { label: "Earlier location", value: nearest.location },
+            { label: "Gap", value: `${Math.max(1, Math.round((at - nearest.at) / 60000))} min` },
           ],
         ),
       );
@@ -360,67 +330,68 @@ export function scoreRecord(rec: EngineInput, stats: DatasetStats): {
   }
 
   /* --- location drift --------------------------------------------- */
-  if (cp && history >= 3 && cp.usualLocationCount >= Math.ceil(history * 0.6) &&
-      rec.location && rec.location.toLowerCase() !== cp.usualLocation.toLowerCase()) {
+  if (
+    ctx.priorCount >= 3 &&
+    ctx.usualLocationCount >= Math.ceil(ctx.priorCount * 0.6) &&
+    rec.location &&
+    rec.location.toLowerCase() !== ctx.usualLocation.toLowerCase()
+  ) {
     signals.push(
       signal(
         "LOCATION_ANOMALY",
         "Unusual location for this customer",
-        `${rec.location} is outside this customer's usual corridor (${cp.usualLocation} on ${cp.usualLocationCount}/${history} prior transactions).`,
+        `${rec.location} is outside this customer's usual corridor (${ctx.usualLocation} on ${ctx.usualLocationCount}/${ctx.priorCount} prior transactions).`,
         "MEDIUM",
         WEIGHTS.locationAnomaly,
         [
           { label: "This txn", value: rec.location },
-          { label: "Usual", value: cp.usualLocation },
-          { label: "History", value: `${history} txns` },
+          { label: "Usual", value: ctx.usualLocation },
+          { label: "Prior txns", value: `${ctx.priorCount}` },
         ],
       ),
     );
   }
 
   /* --- device reputation ------------------------------------------ */
-  /* Two honest, distinct device evidences:
+  /* Two honest, distinct device evidences — both strictly CAUSAL so the
+   * rule is identical whether a batch is scored at once or row-by-row
+   * (scoring-consistency contract):
    *  A) behavioral — the customer HAS prior history and this device is
    *     first-seen for THEM (cold-start customers are exempt: with no
    *     device history, "new" is not evidence).
-   *  B) infrastructure — the device is portfolio-rare (single use in the
-   *     file): a burner tell. Weaker per-customer evidence, labeled as
-   *     what it is; cross-account device sharing is escalated to the
-   *     entity-graph fraud-ring module. */
-  const priorRows = history; // customer's other transactions in the file
-  const customerDeviceUses = cp
-    ? cp.devices.filter((d) => d === rec.device).length - 1 // minus the row itself
-    : 0;
-  const portfolioUses = rec.device ? stats.deviceFirstUse.get(rec.device) ?? 0 : 0;
-  const newForCustomer = rec.device && customerDeviceUses <= 0 && priorRows >= 3;
-  const portfolioRare = rec.device && portfolioUses <= 1;
-  if (rec.device && (newForCustomer || portfolioRare)) {
+   *  B) infrastructure — the device has NEVER appeared in the portfolio
+   *     before this payment (prior-uses == 0): a burner tell, weaker
+   *     per-customer evidence, labeled as what it is. Cross-account
+   *     device sharing is escalated to the entity-graph module. */
+  const newForCustomer = rec.device && ctx.priorCount >= 3 && ctx.priorUsesOfThisDevice <= 0;
+  const portfolioFirstSeen = rec.device && ctx.portfolioPriorDeviceUses <= 0;
+  if (rec.device && (newForCustomer || (portfolioFirstSeen && ctx.priorCount >= 3))) {
     signals.push(
       signal(
         "NEW_DEVICE",
-        newForCustomer ? "First-seen device for this customer" : "Unrecognized device (single use in file)",
+        newForCustomer ? "First-seen device for this customer" : "Device never seen in the portfolio before",
         newForCustomer
-          ? `Device "${rec.device}" has no prior history for ${rec.customerId} across ${priorRows} earlier transactions${portfolioRare ? " and appears nowhere else in the file" : ""} — unseen-device risk on a ${inr(rec.amount)} payment.`
-          : `Device "${rec.device}" appears exactly once in the whole file and has no customer history — burner-device pattern on a ${inr(rec.amount)} payment.`,
+          ? `Device "${rec.device}" has no prior history for ${rec.customerId} across ${ctx.priorCount} earlier transactions${portfolioFirstSeen ? " and has never appeared in the portfolio before" : ""} — unseen-device risk on a ${inr(rec.amount)} payment.`
+          : `Device "${rec.device}" has never appeared in this portfolio before this payment, on a customer with ${ctx.priorCount} prior transactions — burner-device pattern on a ${inr(rec.amount)} payment.`,
         newForCustomer ? "MEDIUM" : "LOW",
         WEIGHTS.newDevice,
         newForCustomer
           ? [
               { label: "Device", value: rec.device },
-              { label: "Usual device", value: cp?.usualDevice || "—" },
+              { label: "Usual device", value: ctx.usualDevice || "—" },
               { label: "Prior uses (customer)", value: "0" },
             ]
           : [
               { label: "Device", value: rec.device },
-              { label: "Seen in file", value: `${portfolioUses}×` },
-              { label: "Customer history", value: `${priorRows} prior txns` },
+              { label: "Prior uses (portfolio)", value: "0" },
+              { label: "Customer history", value: `${ctx.priorCount} prior txns` },
             ],
       ),
     );
   }
 
   /* --- time-of-day ------------------------------------------------ */
-  if (hour !== null && (hour >= 0 && hour < 5)) {
+  if (hour !== null && hour >= 0 && hour < 5) {
     signals.push(
       signal(
         "TIME_ANOMALY",
@@ -434,36 +405,39 @@ export function scoreRecord(rec: EngineInput, stats: DatasetStats): {
   }
 
   /* --- merchant outlier ------------------------------------------- */
-  const mMedian = stats.merchantMedian.get(rec.merchant) ?? 0;
-  if (rec.merchant && mMedian > 0 && rec.amount >= mMedian * 6 && rec.amount >= stats.p95Amount) {
+  if (rec.merchant && ctx.merchantMedian > 0 && rec.amount >= ctx.merchantMedian * 6 && rec.amount >= ctx.portfolioP95) {
     signals.push(
       signal(
         "MERCHANT_RISK",
         "Outlier vs merchant profile",
-        `${inr(rec.amount)} at ${rec.merchant} is ${(rec.amount / mMedian).toFixed(1)}× that merchant's typical ticket and in the top 5% of file values.`,
+        `${inr(rec.amount)} at ${rec.merchant} is ${(rec.amount / ctx.merchantMedian).toFixed(1)}× that merchant's typical ticket and in the top 5% of values to date.`,
         "MEDIUM",
         WEIGHTS.merchantOutlier,
         [
-          { label: "Merchant median", value: inr(mMedian) },
-          { label: "This txn", value: `${(rec.amount / mMedian).toFixed(1)}×` },
+          { label: "Merchant median", value: inr(ctx.merchantMedian) },
+          { label: "This txn", value: `${(rec.amount / ctx.merchantMedian).toFixed(1)}×` },
         ],
       ),
     );
   }
 
   /* --- payment-method mismatch ------------------------------------ */
-  if (cp && history >= 3 && cp.usualMethod && rec.paymentMethod &&
-      rec.paymentMethod.toLowerCase() !== cp.usualMethod.toLowerCase()) {
+  if (
+    ctx.priorCount >= 3 &&
+    ctx.usualMethod &&
+    rec.paymentMethod &&
+    rec.paymentMethod.toLowerCase() !== ctx.usualMethod.toLowerCase()
+  ) {
     signals.push(
       signal(
         "METHOD_MISMATCH",
         "New payment method for this customer",
-        `Paid via ${rec.paymentMethod}; this customer's history is ${cp.usualMethod} — account-takeover actors often switch rails first.`,
+        `Paid via ${rec.paymentMethod}; this customer's history is ${ctx.usualMethod} — account-takeover actors often switch rails first.`,
         "MEDIUM",
         WEIGHTS.methodMismatch,
         [
           { label: "This txn", value: rec.paymentMethod },
-          { label: "Usual", value: cp.usualMethod },
+          { label: "Usual", value: ctx.usualMethod },
         ],
       ),
     );
@@ -599,14 +573,82 @@ export function computeMetrics(rows: ScoredRow[]) {
   };
 }
 
-/** Scores a full batch and derives the aggregate analytics. */
+/**
+ * Scores a full batch CAUSALLY and derives the aggregate analytics.
+ *
+ * Processing order: timestamped rows oldest→newest (ties broken by upload
+ * index), then undated rows in upload order. Each row is scored against
+ * the running state of strictly earlier rows, so the result is identical
+ * whether the batch arrives at once (Dataset Studio) or row-by-row in the
+ * same order (ledger ingestion) — that is the scoring-consistency contract.
+ */
 export function scoreBatch(inputs: EngineInput[]): BatchResult {
-  const stats = computeStats(inputs);
+  /* Scoring order: dated rows chronological (ties by index), undated rows
+   * last in upload order. Output is POSITIONAL — result row k corresponds
+   * to inputs[k] regardless of the index values a caller assigned. */
+  const order = inputs
+    .map((rec, position) => ({ rec, position }))
+    .sort(
+      (a, b) =>
+        (a.rec.at === null ? 1 : 0) - (b.rec.at === null ? 1 : 0) ||
+        (a.rec.at as number) - (b.rec.at as number) ||
+        a.rec.index - b.rec.index ||
+        a.position - b.position,
+    );
 
-  const rows: ScoredRow[] = inputs.map((rec) => {
-    const { score, signals } = scoreRecord(rec, stats);
+  const customers = new Map<string, RunningCustomer>();
+  const portfolioAmounts: number[] = [];
+  const merchantAmounts = new Map<string, number[]>();
+  const portfolioDeviceUses = new Map<string, number>();
+  const rows: ScoredRow[] = new Array(inputs.length);
+
+  const applyRow = (rec: EngineInput): void => {
+    let rc = customers.get(rec.customerId);
+    if (!rc) {
+      rc = emptyCustomer();
+      customers.set(rec.customerId, rc);
+    }
+    insertSorted(rc.amounts, rec.amount);
+    if (rec.location) bump(rc.locations, rec.location);
+    if (rec.device) bump(rc.devices, rec.device);
+    if (rec.paymentMethod) bump(rc.methods, rec.paymentMethod);
+    if (rec.at !== null) rc.timed.push({ at: rec.at, location: rec.location });
+    rc.count += 1;
+
+    insertSorted(portfolioAmounts, rec.amount);
+    if (rec.merchant) {
+      const arr = merchantAmounts.get(rec.merchant);
+      if (arr) insertSorted(arr, rec.amount);
+      else merchantAmounts.set(rec.merchant, [rec.amount]);
+    }
+    if (rec.device) bump(portfolioDeviceUses, rec.device);
+  };
+
+  const scoreOne = (rec: EngineInput, position: number): void => {
+    const rc = customers.get(rec.customerId) ?? emptyCustomer();
+    const usualLoc = modeFromCounts(rc.locations);
+    const usualDev = modeFromCounts(rc.devices);
+    const usualMethod = modeFromCounts(rc.methods);
+
+    const ctx: RowContext = {
+      priorCount: rc.count,
+      priorMedianAmount: medianSorted(rc.amounts),
+      usualLocation: usualLoc.value,
+      usualLocationCount: usualLoc.count,
+      usualDevice: usualDev.value,
+      usualMethod: usualMethod.value,
+      priorUsesOfThisDevice: rec.device ? rc.devices.get(rec.device) ?? 0 : 0,
+      priorTimed: rc.timed,
+      portfolioMedian: medianSorted(portfolioAmounts),
+      portfolioP95: percentileSorted(portfolioAmounts, 95),
+      merchantMedian: rec.merchant ? medianSorted(merchantAmounts.get(rec.merchant) ?? []) : 0,
+      portfolioPriorDeviceUses: rec.device ? portfolioDeviceUses.get(rec.device) ?? 0 : 0,
+    };
+
+    const { score, signals } = scoreRow(rec, ctx);
     const level = scoreToLevel(score);
-    return {
+
+    rows[position] = {
       index: rec.index,
       txnId: rec.txnId,
       amount: rec.amount,
@@ -622,9 +664,15 @@ export function scoreBatch(inputs: EngineInput[]): BatchResult {
       riskLevel: level,
       recommendation: levelToAction(score, level),
       signals,
-      warnings: [],
+      warnings: rec.at === null
+        ? ["No parsable timestamp — scored against the whole dated context (no time axis)."]
+        : [],
     };
-  });
+
+    applyRow(rec);
+  };
+
+  for (const { rec, position } of order) scoreOne(rec, position);
 
   const metrics = computeMetrics(rows);
 

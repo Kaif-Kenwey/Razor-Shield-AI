@@ -57,7 +57,7 @@ The demo feed proves the UI; **Dataset Studio** proves the engine:
 
 1. **Import** — drop in any CSV/TSV export (up to 5 MB / 5,000 rows). Delimiter, quoting and BOM quirks are handled; there's a 58-row labeled sample for a one-click start — including a five-account mule ring planted on purpose.
 2. **Map** — columns are auto-detected against the engine's fields (`amount`, `timestamp`, `customer_id`, `is_fraud`, …) with fuzzy header matching — payment exports name the same field a dozen different ways. Everything is editable before the run.
-3. **Score** — rows go to `POST /api/datasets/analyze`; the deterministic engine (`rse-1.2`, `src/lib/riskEngine.ts`) builds per-customer baselines and scores every row against 10 rules: high value, structuring, customer-relative amount deviation, velocity bursts, impossible travel, location drift, first-seen devices (per-customer first-seen and portfolio-rare burners are distinct signals), odd-hour activity, merchant outliers, payment-method switches.
+3. **Score** — rows go to `POST /api/datasets/analyze`; the deterministic engine (`rse-1.2`, `src/lib/riskEngine.ts`) builds per-customer baselines and scores every row against 10 rules: high value, structuring, customer-relative amount deviation, velocity bursts, impossible travel, location drift, first-seen devices (per-customer first-seen and portfolio-first-seen burners are distinct signals), odd-hour activity, merchant outliers, payment-method switches. Scoring is **causal**: rows are processed chronologically and every rule sees only strictly-earlier context, so Dataset Studio and the ledger produce identical scores for the same rows — verified row-by-row by the test suite.
 4. **Measure** — with ground-truth labels the run reports **precision, recall, F1, the confusion matrix and the rupee cost of both mistake types** (false alarm = wrongly frozen funds + ₹450 review ops; miss = the fraud loss). Unlabeled files still get volume analytics.
 
 Every run is persisted in SQLite (Prisma) and re-openable from history. Alerts route into the live investigation queue with one click — scored rows become real cases with the full workspace.
@@ -93,6 +93,32 @@ Three tools live under the scored results, because a score without instruments i
 - The fraud-graph currently links on shared device fingerprints; adding IP/email/address edges is roadmap work.
 - Persistence is local-first SQLite — right for the demo, not for scale. A production deployment would swap it for managed PostgreSQL (the Prisma schema ports as-is); nothing else in the app assumes a single machine.
 - **Scoring is time-aware, not clairvoyant.** Historical imports are processed chronologically and every row's context (customer history + portfolio baselines) is cut at its own timestamp — a 10:00 AM payment can never be scored with the 10:10 AM ₹95,000 one. Invalid or future timestamps are flagged in the row's warnings instead of being silently treated as "now".
+- **The investigation API trusts the database, not the client.** `POST /api/investigate` accepts ONLY a `transactionId`; amount, risk score, signals, customer profile and precedent recall are loaded server-side from SQLite (`src/lib/server/caseContext.ts`). A tampered request cannot change the facts the LLM sees, unknown transactions are rejected with 404, and LLM verdicts are persisted server-side with provider/model/latency so the mode survives a restart.
+
+## Evaluation on a genuine, labelled dataset
+
+The built-in demo portfolio is synthetic by design — so the project is also evaluated against an **external, anonymised, fraud-labelled benchmark**: a stratified sample of the public Sparkov credit-card fraud dataset (4,036 rows, 699 labeled frauds, 65 anonymised cards). Provenance, anonymisation and the sampling method are documented in [`data/PROVENANCE.md`](data/PROVENANCE.md). Measured honestly in Dataset Studio (alert = scored MEDIUM+, matching the review queue):
+
+| Metric | Result |
+|---|---|
+| Precision | **86.9%** (293 TP / 44 FP) |
+| Recall | **41.9%** (406 frauds missed) |
+| F1 | 56.6 |
+| Score consistency, Dataset Studio → ledger | **100.00%** of 4,035 rows identical after chronological import |
+
+Disclosed caveats: the sample is stratified (fraud density 17.3% vs 0.58% in the full source — not production-like); amounts were converted USD→INR at a fixed, documented ₹83 rate so the absolute thresholds are calibrated; the source carries no device fingerprint or payment rail, so those signals cannot fire and the UI reports the gap as data-quality warnings. Recall at 41.9% is the honest ceiling of a 10-rule deterministic engine on this file — the Threshold Lab shows the precision/recall trade-off at every cutoff.
+
+## Automated tests
+
+`bun test` runs 15 tests against an isolated SQLite database (`db/test.db` — the dev/demo ledger is never touched):
+
+- **No future-data leakage** — a payment's score is unchanged by later, larger payments; velocity/impossible-travel only see earlier rows.
+- **Scoring consistency** — batch scoring == sequential chronological scoring, row by row (the Dataset Studio ↔ ledger contract).
+- **Duplicate rejection** — re-ingesting a ledger id returns 409; re-importing the same rows reports duplicates.
+- **CSV import validation** — invalid rows are reported per-row instead of failing the batch.
+- **Tamper-proof investigations** — injected context fields are ignored, unknown ids get 404, missing ids get 400.
+- **LLM fallback contract** — without a configured LLM the investigation route answers honestly and the heuristic path is used.
+- **Decision + case-note persistence** — recorded through the API and verified with a fresh Prisma client (restart simulation).
 
 ## Security posture (read before deploying publicly)
 

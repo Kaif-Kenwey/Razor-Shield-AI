@@ -501,7 +501,8 @@ export interface InvestigationVerdict {
 }
 
 export async function runInvestigation(payload: {
-  context: Record<string, unknown>;
+  /** The ONLY field the server accepts — all case facts are loaded from SQLite server-side. */
+  transactionId: string;
 }): Promise<{ ok: boolean; verdict?: InvestigationVerdict; reason?: string }> {
   return request(ENDPOINTS.investigate, {
     method: "POST",

@@ -23,7 +23,8 @@ import { StatusDot } from "@/components/shared/StatusDot";
 import { EmptyState } from "@/components/shared/States";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/store/appStore";
-import { ANALYSTS, customerFor } from "@/data/mockData";
+import { useServerCustomer } from "@/hooks/useServerCustomer";
+import { ANALYSTS } from "@/data/mockData";
 import {
   MIN_THEATER_MS,
   deriveConclusion,
@@ -60,7 +61,10 @@ export function InvestigationView() {
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const agentKey = useRef<string | null>(null);
 
-  const customer = useMemo(() => (txn ? customerFor(txn) : null), [txn]);
+  /* Server-authoritative profile: real ledger aggregates (time-aware) —
+   * the mock roster renders first, then every derived field is replaced
+   * with what the database actually says. */
+  const customer = useServerCustomer(txn);
 
   const totalSteps = 6;
 

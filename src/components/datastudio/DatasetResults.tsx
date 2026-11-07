@@ -122,7 +122,8 @@ function downloadScoredCsv(analysis: DatasetAnalysis): void {
 /** Convert an alerted row into a live-feed transaction for the case queue. */
 export function scoredRowToTransaction(row: ScoredRow, datasetId: string): Transaction {
   const METHODS: Transaction["paymentMethod"][] = ["UPI", "Credit Card", "Debit Card", "Netbanking", "Wallet"];
-  const method = METHODS.find((m) => m.toLowerCase() === row.paymentMethod.toLowerCase()) ?? "UPI";
+  /* Honest fallback — a missing/unrecognized rail stays Unknown. */
+  const method = METHODS.find((m) => m.toLowerCase() === row.paymentMethod.toLowerCase()) ?? "Unknown";
   const status: Transaction["status"] =
     row.recommendation === "BLOCK"
       ? "BLOCKED"

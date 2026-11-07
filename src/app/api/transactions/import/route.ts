@@ -41,7 +41,7 @@ const rowSchema = z.object({
 
 const importSchema = z.object({
   datasetName: z.string().trim().max(120).default("Imported dataset"),
-  rows: z.array(rowSchema).min(1, "No rows to import").max(2000, "Import up to 2000 rows per run"),
+  rows: z.array(z.record(z.string(), z.unknown())).min(1, "No rows to import").max(2000, "Import up to 2000 rows per run"),
   /** 1-based chunk index and total — progress reporting for chunked sends. */
   chunkIndex: z.number().int().min(1).optional(),
   chunkTotal: z.number().int().min(1).optional(),
@@ -74,13 +74,29 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return jsonError(parsed.error.issues[0]?.message ?? "Invalid import payload");
   }
-  const { datasetName, rows, chunkIndex, chunkTotal } = parsed.data;
+  const { datasetName, rows: rawRows, chunkIndex, chunkTotal } = parsed.data;
+
+  /* Per-row validation — an invalid row is REPORTED, never allowed to
+   * poison the whole batch (matches the app's honest-ops stance; the
+   * Dataset Studio skips unusable rows with a count, so does the import). */
+  type ValidRow = z.infer<typeof rowSchema>;
+  const validRows: ValidRow[] = [];
+  const failed: { txnId: string; error: string }[] = [];
+  for (const raw of rawRows) {
+    const parsedRow = rowSchema.safeParse(raw);
+    if (parsedRow.success) {
+      validRows.push(parsedRow.data);
+    } else {
+      const txnId = typeof raw.txnId === "string" ? raw.txnId : `row-${failed.length + 1}`;
+      failed.push({ txnId, error: parsedRow.error.issues[0]?.message ?? "Invalid row" });
+    }
+  }
 
   /* Chronological processing — the scoring service cuts every row's
    * history at its own timestamp; feeding rows oldest-first guarantees
    * each payment only ever sees payments that already happened. Rows
    * with unparseable timestamps score last (already warned). */
-  const ordered = rows
+  const ordered = validRows
     .map((row, i) => ({ row, i, ts: row.timestamp ? new Date(row.timestamp).getTime() : NaN }))
     .sort((a, b) => {
       const aOk = Number.isNaN(a.ts) ? Infinity : a.ts;
@@ -91,7 +107,6 @@ export async function POST(request: Request) {
 
   let imported = 0;
   const duplicates: string[] = [];
-  const failed: { txnId: string; error: string }[] = [];
 
   for (const row of ordered) {
     try {
@@ -142,6 +157,6 @@ export async function POST(request: Request) {
     imported,
     duplicates,
     failed,
-    total: rows.length,
+    total: rawRows.length,
   });
 }

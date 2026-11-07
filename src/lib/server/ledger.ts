@@ -139,7 +139,9 @@ const METHODS = ["UPI", "Credit Card", "Debit Card", "Netbanking", "Wallet"] as 
 
 function normalizeMethod(raw: string): Transaction["paymentMethod"] {
   const hit = METHODS.find((m) => m.toLowerCase() === raw.toLowerCase());
-  return hit ?? "UPI";
+  /* Honest fallback: an absent/unrecognized rail is shown as Unknown —
+   * never silently fabricated into a real rail like UPI. */
+  return hit ?? "Unknown";
 }
 
 /** UI status the ledger stores after an analyst decision. */

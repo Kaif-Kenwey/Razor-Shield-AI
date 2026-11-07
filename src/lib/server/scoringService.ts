@@ -24,10 +24,13 @@ import { db } from "@/lib/db";
 import { scoreBatch, type EngineInput } from "@/lib/riskEngine";
 import { writeAudit } from "@/lib/server/ledger";
 
-/** How much stored history feeds the engine for one new payment. */
-const CUSTOMER_HISTORY_CAP = 120;
-/** Recent portfolio sample used for medians / p95 / merchant baselines. */
-const PORTFOLIO_CONTEXT_CAP = 600;
+/** How much stored history feeds the engine for one new payment. Aligned
+ * with DATASET_LIMITS.maxRows so a dataset imported into an empty ledger
+ * sees exactly the context Dataset Studio scored it against. */
+const CUSTOMER_HISTORY_CAP = 5000;
+/** Recent portfolio sample used for medians / p95 / merchant baselines.
+ * Same alignment rationale as CUSTOMER_HISTORY_CAP. */
+const PORTFOLIO_CONTEXT_CAP = 5000;
 
 /** A new payment as submitted by any ingestion surface. */
 export interface NewTransactionInput {

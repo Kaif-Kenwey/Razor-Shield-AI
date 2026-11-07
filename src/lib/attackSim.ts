@@ -21,7 +21,7 @@
  * coordination — shared infrastructure is what betrays organized fraud.
  */
 
-import { computeStats, scoreRecord, type EngineInput } from "@/lib/riskEngine";
+import { scoreBatch, type EngineInput } from "@/lib/riskEngine";
 import { detectFraudRings } from "@/lib/fraudGraph";
 import type { RiskAction, RiskLevel, RiskSignal } from "@/types";
 import type { ScoredRow } from "@/types/dataset";
@@ -388,30 +388,12 @@ function makeInput(
 }
 
 function scoreWave(datasetInputs: EngineInput[], gen: GenRow[]): ScoredRow[] {
-  const stats = computeStats([...datasetInputs, ...gen.map((g) => g.input)]);
-  return gen.map((g) => {
-    const { score, signals, recommendation } = scoreRecord(g.input, stats);
-    const level: RiskLevel =
-      score >= 75 ? "CRITICAL" : score >= 50 ? "HIGH" : score >= 28 ? "MEDIUM" : "LOW";
-    return {
-      index: g.input.index,
-      txnId: g.input.txnId,
-      amount: g.input.amount,
-      timestamp: g.input.at !== null ? new Date(g.input.at).toISOString() : null,
-      customerId: g.input.customerId,
-      customerName: g.input.customerName,
-      merchant: g.input.merchant,
-      location: g.input.location,
-      device: g.input.device,
-      paymentMethod: g.input.paymentMethod,
-      label: g.input.label,
-      riskScore: score,
-      riskLevel: level,
-      recommendation: recommendation as RiskAction,
-      signals,
-      warnings: [],
-    } satisfies ScoredRow;
-  });
+  /* Attack rows are scored causally against the dataset snapshot + earlier
+   * wave rows (same engine path as Dataset Studio and the ledger). */
+  const all = [...datasetInputs, ...gen.map((g) => g.input)];
+  const batch = scoreBatch(all);
+  const byId = new Map(batch.rows.map((r) => [r.txnId, r]));
+  return gen.map((g) => byId.get(g.input.txnId)!).filter(Boolean);
 }
 
 /* ------------------------------------------------------------------ */

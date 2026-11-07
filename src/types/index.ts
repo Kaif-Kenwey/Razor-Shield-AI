@@ -61,7 +61,9 @@ export interface Transaction {
   location: string;
   device: string;
   isNewDevice: boolean;
-  paymentMethod: "UPI" | "Credit Card" | "Debit Card" | "Netbanking" | "Wallet";
+  /** Payment rail. "Unknown" = the source data did not carry one — the
+   * engine then disables rail-relative signals instead of guessing. */
+  paymentMethod: "UPI" | "Credit Card" | "Debit Card" | "Netbanking" | "Wallet" | "Unknown";
   riskScore: number; // 0–100
   riskLevel: RiskLevel;
   status: TransactionStatus;
