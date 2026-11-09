@@ -35,20 +35,15 @@ interface ServerCustomerPayload {
   history?: { label: string; amount: number; riskScore: number; flagged?: boolean }[];
 }
 
-/** Account age relative to the CASE timestamp — never to "now". */
-function accountAgeFrom(firstSeen: string | null, atIso: string): string | undefined {
-  if (!firstSeen) return undefined;
-  const first = new Date(firstSeen).getTime();
-  const at = new Date(atIso).getTime();
-  if (!Number.isFinite(first) || !Number.isFinite(at) || at < first) return undefined;
-  const days = Math.floor((at - first) / 86_400_000);
-  if (days < 1) return "same day";
-  if (days < 31) return `${days} day${days === 1 ? "" : "s"}`;
-  const months = Math.floor(days / 30.44);
-  if (months < 24) return `${months} month${months === 1 ? "" : "s"}`;
-  const years = Math.floor(months / 12);
-  return `${years} year${years === 1 ? "" : "s"} ${months % 12} mo`;
-}
+/**
+ * ACCOUNT AGE IS HONEST BY OMISSION: the ledger's firstSeen is when the
+ * customer FIRST APPEARED IN RAZORSHIELD, not when a real bank account was
+ * opened — presenting it as "account age" would fabricate a fact. No
+ * supported data source carries a genuine account-opening date, so the
+ * field reports Unknown. It flips to a real value the day a source column
+ * actually provides one.
+ */
+const UNKNOWN_ACCOUNT_AGE = "Unknown";
 
 export function useServerCustomer(txn: Transaction | null): Customer | null {
   /* Server-merged profile keyed by txn id — when the case changes, the key
@@ -72,7 +67,9 @@ export function useServerCustomer(txn: Transaction | null): Customer | null {
           id: c.id,
           name: c.name || c.id,
           kycTier: (c.kycTier as Customer["kycTier"]) || fallback.kycTier,
-          accountAge: accountAgeFrom(c.firstSeen, t.timestamp) ?? fallback.accountAge,
+          /* Never fall back to the mock roster's fabricated age here —
+           * imported customers must not inherit invented profile facts. */
+          accountAge: UNKNOWN_ACCOUNT_AGE,
           avgTransaction: c.avgTransaction || fallback.avgTransaction,
           transactionCount: c.transactionCount ?? fallback.transactionCount,
           previousIncidents: c.priorIncidents ?? 0,

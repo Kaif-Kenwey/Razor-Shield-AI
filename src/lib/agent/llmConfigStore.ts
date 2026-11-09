@@ -23,8 +23,13 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync,
 import path from "path";
 import type { LlmConfig } from "./llm";
 
-const CONFIG_DIR = path.join(process.cwd(), "db");
-const CONFIG_PATH = path.join(CONFIG_DIR, "llm-config.json");
+/* LLM_CONFIG_PATH (test/isolation hook): redirects the whole config store
+ * (config + secret file) elsewhere. Tests set it to a temp path BEFORE the
+ * first import so they can never read or overwrite the operator's real
+ * saved credentials, and never trigger real provider calls. */
+const CONFIG_PATH =
+  process.env.LLM_CONFIG_PATH?.trim() || path.join(process.cwd(), "db", "llm-config.json");
+const CONFIG_DIR = path.dirname(CONFIG_PATH);
 const SECRET_PATH = path.join(CONFIG_DIR, ".llm-secret");
 
 export const LLM_CONFIG_PATH = CONFIG_PATH;

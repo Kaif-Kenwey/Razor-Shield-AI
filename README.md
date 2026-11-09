@@ -104,7 +104,7 @@ The built-in demo portfolio is synthetic by design — so the project is also ev
 | Precision | **86.9%** (293 TP / 44 FP) |
 | Recall | **41.9%** (406 frauds missed) |
 | F1 | 56.6 |
-| Score consistency, Dataset Studio → ledger | **100.00%** of 4,035 rows identical after chronological import |
+| Score consistency, Dataset Studio → ledger | Batch scorer and chronological per-row ledger ingestion produce **identical scores** — asserted row-by-row by the automated test suite (`tests/riskEngine.test.ts`) on every CI run |
 
 Disclosed caveats: the sample is stratified (fraud density 17.3% vs 0.58% in the full source — not production-like); amounts were converted USD→INR at a fixed, documented ₹83 rate so the absolute thresholds are calibrated; the source carries no device fingerprint or payment rail, so those signals cannot fire and the UI reports the gap as data-quality warnings. Recall at 41.9% is the honest ceiling of a 10-rule deterministic engine on this file — the Threshold Lab shows the precision/recall trade-off at every cutoff.
 

@@ -8,7 +8,9 @@
  * LLM is told about the case.
  *
  * Everything is bounded and time-aware: customer aggregates and precedent
- * recall only see transactions at or before the case's own timestamp.
+ * recall only see transactions STRICTLY BEFORE the case's own timestamp —
+ * the case itself is never counted as its own history, and no future row
+ * can leak into the picture.
  */
 
 import { db } from "@/lib/db";
@@ -42,10 +44,13 @@ interface PriorRow {
   analystAction: string | null;
 }
 
-/** Load prior transactions (≤ the case timestamp) with their adjudication. */
+/** Load prior transactions (STRICTLY BEFORE the case timestamp) with their
+ * adjudication. `lt` (not `lte`) guarantees the case under investigation
+ * can never appear in its own prior history — a self-included count or
+ * average would mislead the analyst and the LLM alike. */
 async function loadPriorRows(customerId: string, at: Date): Promise<PriorRow[]> {
   const rows = await db.transaction.findMany({
-    where: { timestamp: { lte: at } },
+    where: { timestamp: { lt: at } },
     orderBy: { timestamp: "desc" },
     take: RECALL_POOL,
     select: {
@@ -205,7 +210,7 @@ export async function loadServerCaseContext(txnId: string): Promise<ServerCaseCo
   const [priorRows, customer, priorIncidentCount] = await Promise.all([
     loadPriorRows(row.customerId, at),
     db.customer.findUnique({ where: { id: row.customerId } }),
-    db.transaction.count({ where: { customerId: row.customerId, timestamp: { lte: at }, label: 1 } }),
+    db.transaction.count({ where: { customerId: row.customerId, timestamp: { lt: at }, label: 1 } }),
   ]);
 
   const priorForCustomer = priorRows.filter((r) => r.customerId === row.customerId);
@@ -240,12 +245,12 @@ export async function loadServerCaseContext(txnId: string): Promise<ServerCaseCo
     customer: {
       id: row.customerId,
       name: customer?.name || row.customerName || undefined,
-      accountAge: customer?.createdAt
-        ? (() => {
-            const days = Math.max(0, Math.floor((at.getTime() - customer.createdAt.getTime()) / 86_400_000));
-            return days >= 365 ? `${Math.floor(days / 365)} year(s) ${days % 365} days` : `${days} days`;
-          })()
-        : undefined,
+      /* ACCOUNT AGE IS HONEST BY OMISSION: Customer.createdAt records when
+       * RazorShield created its own customer row, NOT when the real bank
+       * account was opened. The schema has no genuine account-open date
+       * (no source column in any supported import), so the age is reported
+       * as unknown instead of fabricating one from record creation. */
+      accountAge: undefined,
       transactionCount: priorForCustomer.length,
       avgTransaction: priorAmounts.length
         ? Math.round(priorAmounts.reduce((s, n) => s + n, 0) / priorAmounts.length)

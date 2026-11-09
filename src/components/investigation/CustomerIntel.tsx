@@ -180,7 +180,7 @@ function BaselineComparison({ customer, txn }: { customer: Customer; txn: Transa
 
 export function CustomerIntel({ customer, analyzing, txn }: { customer: Customer; analyzing: boolean; txn?: Transaction }) {
   const stats = [
-    { label: "Account age", value: customer.accountAge },
+    { label: "Account age", value: customer.accountAge || "Unknown" },
     { label: "Avg transaction", value: formatINR(customer.avgTransaction) },
     { label: "Transactions", value: String(customer.transactionCount) },
     { label: "Previous incidents", value: String(customer.previousIncidents), alert: customer.previousIncidents > 0 },

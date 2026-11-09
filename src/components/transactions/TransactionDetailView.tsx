@@ -152,7 +152,7 @@ function DetailSections({ txn }: { txn: Transaction }) {
             <div className="space-y-3">
               <p className="border-l-2 border-intel/40 pl-3 text-[12.5px] leading-relaxed text-slate-300">{txn.aiSummary}</p>
               <ul className="flex flex-wrap gap-x-4 gap-y-1">
-                {(txn.investigation?.evidenceUsed ?? ["Customer transaction history", "Device history", "Location history", "Transaction velocity", "ML risk score"]).map((e) => (
+                {(txn.investigation?.evidenceUsed ?? ["Customer transaction history", "Device history", "Location history", "Transaction velocity", "Rule-based risk score"]).map((e) => (
                   <li key={e} className="text-[11px] text-slate-500">✓ {e}</li>
                 ))}
               </ul>

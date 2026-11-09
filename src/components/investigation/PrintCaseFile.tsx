@@ -172,7 +172,7 @@ export function PrintCaseFile({
       {customer && (
         <Section title="Customer intelligence">
           <dl style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "8px 16px" }}>
-            <Meta label="Account age" value={customer.accountAge} />
+            <Meta label="Account age" value={customer.accountAge || "Unknown"} />
             <Meta label="Avg transaction" value={formatINR(customer.avgTransaction)} />
             <Meta label="Transactions (90d)" value={String(customer.transactionCount)} />
             <Meta label="Prior incidents" value={String(customer.previousIncidents)} />

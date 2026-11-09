@@ -1,3 +1,4 @@
+transaction_id,timestamp,customer_id,amount,merchant,location,category,is_fraud
 a76f5e9735622f062eb663f06c169a94,2019-01-01T01:14:11Z,CUS_F402A4D3,4200.63,"Huels-Nolan","Princeton, IA",gas_transport,0
 f487762b6cebc5a18abcfcb90b644c01,2019-01-01T01:15:01Z,CUS_3376FD98,3315.85,"Kutch-Hegmann","Smackover, AR",grocery_net,0
 f83ceecffe486ed53cec38744c188160,2019-01-01T02:16:47Z,CUS_712DF374,15114.30,"Lockman Ltd","Maysville, KY",grocery_pos,0
@@ -4034,4 +4035,3 @@ b8cc45bccf37674273fe69c24094d65d,2020-06-20T19:25:17Z,CUS_4A108F8A,831.66,"Bins,
 5f0eaf02587d5b98d0c6e82e5a6f733e,2020-06-20T22:35:33Z,CUS_4A108F8A,11190.89,"Bins-Tillman","Brunson, SC",entertainment,0
 348abf7765a490c59f53d0e041fa91c4,2020-06-21T00:38:09Z,CUS_8E1E5EB7,614.20,"Reichert, Huels and Hoppe","Girard, GA",shopping_net,0
 dc373a763886795f5ace28d142e37e89,2020-06-21T08:47:47Z,CUS_8E1E5EB7,9496.86,"Schultz, Simonis and Little","Girard, GA",grocery_pos,0
-transaction_id,timestamp,customer_id,amount,merchant,location,category,is_fraud

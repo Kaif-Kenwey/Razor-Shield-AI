@@ -281,7 +281,7 @@ export function buildTimeline(txn: Transaction, baseIso: string): TimelineEvent[
     {
       id: `${txn.id}-t5`,
       time: at(4),
-      label: "ML risk score calculated",
+      label: "Rule-engine risk score calculated",
       detail: `Score ${txn.riskScore}/100`,
       kind: "model",
     },
@@ -334,7 +334,7 @@ export function buildInvestigation(txn: Transaction, baseIso: string): Investiga
     "Device history",
     "Location history",
     "Transaction velocity",
-    "ML risk score",
+    "Rule-based risk score",
   ];
 
   const signalNames = txn.signals.map((s) => s.title.toLowerCase()).join(", ");

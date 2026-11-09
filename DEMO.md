@@ -34,9 +34,10 @@ feed, and the evaluation file `data/sparkov_anonymised_sample.csv` on hand
   and payment rail are deliberately left unmapped** — the source dataset
   doesn't have them, and the app reports that as a data-quality gap
   instead of inventing values.
-- Click **Score 4,036 rows**. The header shows `4,035 rows scored · 1
-  skipped (unusable amount) · 337 alerts` and **DATA QUALITY 80%** with the
-  red `DEVICE FINGERPRINT 0%` chip.
+- Click **Score 4,036 rows**. The header shows `4,036 ROWS SCORED · 337
+  ALERTS` — every row in the file is usable, so nothing is skipped (the
+  parser counts malformed/unusable rows honestly when they exist). Below,
+  **DATA QUALITY 80%** with the red `DEVICE FINGERPRINT 0%` chip.
 - Scroll to **Engine quality**: precision **86.9%**, recall **41.9%**,
   F1 56.6, confusion matrix, rupee cost of both mistake types. Say the
   recall number out loud — it's the honest ceiling of a 10-rule engine on
@@ -45,7 +46,7 @@ feed, and the evaluation file `data/sparkov_anonymised_sample.csv` on hand
 
 ## 3. Demonstrate risk detection
 
-- In the run header click **Import 4035 rows to ledger** — rows are scored
+- In the run header click **Import 4036 rows to ledger** — rows are scored
   per-row against the ledger chronologically, with a live progress bar.
 - Open **Transactions**: the ledger now holds the imported rows
   (`dataSource="import"`) alongside the demo portfolio
@@ -59,9 +60,10 @@ feed, and the evaluation file `data/sparkov_anonymised_sample.csv` on hand
 - **Investigations → open a HIGH case** from the imported data.
 - Walk the case file: risk score composition (each signal's point
   contribution), risk signals with facts, **customer intelligence —
-  genuine aggregates from the ledger** (account age, prior transaction
-  count, average ticket, usual location; "unknown" where the data has
-  none), transaction timeline and similar past cases.
+  genuine aggregates from the ledger** (prior transaction count, average
+  ticket, usual location; "Unknown" where the data has none — e.g.
+  account age, because no genuine account-opening date exists in any
+  supported import), transaction timeline and similar past cases.
 - The AI investigator panel shows **HEURISTIC · LLM UNAVAILABLE** —
   deterministic analysis of record. (Optional: connect an LLM from the top
   bar `AI` button and rerun; the badge flips to the model that answered,
@@ -89,14 +91,18 @@ feed, and the evaluation file `data/sparkov_anonymised_sample.csv` on hand
 - Close with the automated test suite: `bun test` — 15 tests covering
   future-data leakage, scoring consistency, duplicate rejection, import
   validation, tamper-proofing, LLM fallback and restart persistence.
+  The same suite runs in CI (GitHub Actions) against an isolated test
+  database on every push.
 
 ---
 
 ### Backup talking points
 
 - **Scoring consistency**: the same rows score identically in Dataset
-  Studio and the ledger — 100.00% of 4,035 rows matched in the recorded
-  run — because both use the same causal engine path (`tests/riskEngine.test.ts`).
+  Studio and the ledger, because both use the same causal engine path —
+  proven by `tests/riskEngine.test.ts` (the Studio ⇔ ledger consistency
+  test seeds rows through the real ledger service and asserts score
+  equality with the batch scorer on every CI run).
 - **Why recall isn't 90%**: static rules can't see adapted attacks; the
   **Attack Simulator** (Detection Benchmark) demonstrates the arms race —
   per-row detection decays as the red team adapts while the entity graph

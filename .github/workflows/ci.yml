@@ -26,6 +26,22 @@ jobs:
       - name: Typecheck
         run: bunx tsc --noEmit
 
+      # Isolated test database (never the app's own db file). The suite
+      # wipes it at start, so every CI run begins from a known state.
+      - name: Prepare isolated test database
+        run: bunx prisma db push --skip-generate
+        env:
+          DATABASE_URL: file:${{ github.workspace }}/db/test.db
+
+      # 15 tests: causal scoring (no future leakage), Studio ⇔ ledger
+      # scoring consistency, duplicate/invalid-row import handling,
+      # tamper-proof investigation facts, honest Unknown account age,
+      # LLM failure fallback, restart persistence, append-only audit.
+      - name: Test suite (bun test)
+        run: bun test
+        env:
+          DATABASE_URL: file:${{ github.workspace }}/db/test.db
+
       - name: Build
         run: bun run build
         env:
