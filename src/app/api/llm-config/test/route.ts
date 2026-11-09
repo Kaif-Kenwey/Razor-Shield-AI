@@ -23,8 +23,10 @@ import {
   resolveLlmConfig,
   type LlmConfig,
 } from "@/lib/agent/llm";
+import { providerById, sanitizeApiKey } from "@/lib/agent/providers";
 import { markRuntimeConfigVerified, readRuntimeLlmConfig, reusableSavedKey } from "@/lib/agent/llmConfigStore";
 import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
+import { describeProviderHttpFailure, extractProviderMessage } from "@/lib/server/providerErrors";
 import { clientKey, rateLimit } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
@@ -76,15 +78,12 @@ async function probe(cfg: LlmConfig): Promise<ProbeResult> {
     });
 
     if (!res.ok) {
-      const detail =
-        res.status === 401 || res.status === 403
-          ? "Authentication failed — the endpoint rejected the API key"
-          : res.status === 404
-            ? "Endpoint not found — check the base URL (it should end at /v1; /chat/completions is added automatically)"
-            : res.status === 429
-              ? "Rate limited by the provider — free models have request limits that depend on account status; wait a moment and retry"
-              : `Endpoint responded ${res.status}`;
-      return { ok: false, error: detail };
+      /* Honest failure mapping: read the provider's own error body and
+       * distinguish a rejected KEY (401) from refused ACCESS (403 — WAF /
+       * region blocks, e.g. Groq refusing datacenter IPs). */
+      const providerMessage = extractProviderMessage(await res.text().catch(() => null));
+      const providerName = cfg.provider ? providerById(cfg.provider)?.name : undefined;
+      return { ok: false, error: describeProviderHttpFailure(res.status, providerMessage, providerName) };
     }
 
     const data: unknown = await res.json();
@@ -126,7 +125,8 @@ export async function POST(request: Request) {
 
   const b = (body ?? {}) as Record<string, unknown>;
   const providedBase = typeof b.baseUrl === "string" ? b.baseUrl.trim().replace(/\/+$/, "") : "";
-  const providedKey = typeof b.apiKey === "string" ? b.apiKey.trim() : "";
+  /* Normalize pasted credentials (quotes / "Bearer " / whitespace). */
+  const providedKey = typeof b.apiKey === "string" ? sanitizeApiKey(b.apiKey) : "";
 
   let cfg: LlmConfig | null = null;
   if (providedBase) {

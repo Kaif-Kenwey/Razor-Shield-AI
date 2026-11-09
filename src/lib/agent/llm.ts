@@ -22,7 +22,9 @@
  */
 
 import { readRuntimeLlmConfig } from "./llmConfigStore";
+import { providerById, sanitizeApiKey } from "./providers";
 import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
+import { describeProviderHttpFailure, extractProviderMessage } from "@/lib/server/providerErrors";
 
 export interface LlmConfig {
   baseUrl: string;
@@ -73,7 +75,7 @@ export function resolveLlmConfig(): LlmConfig | null {
 
   return {
     baseUrl: baseUrl.replace(/\/+$/, ""),
-    apiKey,
+    apiKey: sanitizeApiKey(apiKey),
     model: process.env.LLM_MODEL?.trim() ?? "",
     extraHeaders,
     provider: "env" as const,
@@ -235,7 +237,17 @@ export async function chatComplete(
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    if (!res.ok) throw new LlmError(`LLM endpoint responded ${res.status}`, res.status);
+    if (!res.ok) {
+      /* Same honest mapping as the config panel: 401 = the key was
+       * rejected; 403 = access refused (often a region/IP/WAF block, not
+       * the key). The provider's own message is surfaced verbatim. */
+      const providerMessage = await res
+        .text()
+        .then((t) => extractProviderMessage(t))
+        .catch(() => undefined);
+      const providerName = cfg.provider ? providerById(cfg.provider)?.name : undefined;
+      throw new LlmError(describeProviderHttpFailure(res.status, providerMessage, providerName), res.status);
+    }
     const data: unknown = await res.json();
     const content = (data as { choices?: { message?: { content?: unknown } }[] })
       ?.choices?.[0]?.message?.content;

@@ -20,9 +20,10 @@
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { providerById, type ProviderId } from "@/lib/agent/providers";
+import { providerById, sanitizeApiKey, type ProviderId } from "@/lib/agent/providers";
 import { readRuntimeLlmConfig, reusableSavedKey } from "@/lib/agent/llmConfigStore";
 import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
+import { describeProviderHttpFailure, extractProviderMessage } from "@/lib/server/providerErrors";
 import { clientKey, rateLimit } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
@@ -58,11 +59,14 @@ async function fetchJson(url: string, headers: Record<string, string>, timeoutMs
       throw new Error("Provider returned invalid JSON");
     }
     if (!res.ok) {
-      const apiMessage =
-        typeof (data as { error?: { message?: string } })?.error?.message === "string"
-          ? (data as { error: { message: string } }).error.message
-          : undefined;
-      throw Object.assign(new Error(apiMessage || `Provider responded ${res.status}`), { status: res.status });
+      /* Keep the provider's own message — the friendly mapper surfaces it
+       * verbatim so operators see the REAL reason (e.g. Groq's bare
+       * "Forbidden" WAF reply vs a genuine "Invalid API Key"). */
+      const apiMessage = extractProviderMessage(text);
+      throw Object.assign(new Error(apiMessage || `Provider responded ${res.status}`), {
+        status: res.status,
+        providerMessage: apiMessage,
+      });
     }
     return data;
   } finally {
@@ -70,8 +74,8 @@ async function fetchJson(url: string, headers: Record<string, string>, timeoutMs
   }
 }
 
-function friendlyError(err: unknown): { message: string; status?: number } {
-  const e = err as { message?: string; status?: number; code?: string; name?: string };
+function friendlyError(err: unknown, providerName?: string): { message: string; status?: number } {
+  const e = err as { message?: string; status?: number; code?: string; name?: string; providerMessage?: string };
   if (e instanceof UrlGuardError) {
     return { message: e.message, status: 400 };
   }
@@ -79,14 +83,11 @@ function friendlyError(err: unknown): { message: string; status?: number } {
     return { message: "Provider catalogue request timed out — try Refresh Models." };
   }
   const status = e?.status;
-  if (status === 401 || status === 403) {
-    return { message: "Authentication failed — the endpoint rejected the API key.", status };
-  }
-  if (status === 429) {
-    return { message: "Rate limited by the provider — wait a moment and refresh.", status };
-  }
-  if (status && status >= 500) {
-    return { message: `Provider unavailable (HTTP ${status}) — try again shortly.`, status };
+  if (typeof status === "number" && status >= 400) {
+    return {
+      message: describeProviderHttpFailure(status, e?.providerMessage, providerName),
+      status,
+    };
   }
   return { message: e?.message || "Could not reach the provider's model catalogue.", status };
 }
@@ -202,9 +203,12 @@ export async function POST(request: Request) {
   const meta = providerById(provider);
 
   /* Key resolution: caller-supplied → saved key for the same provider /
-   * same endpoint → none. The stored key never leaves the server. */
+   * same endpoint → none. The stored key never leaves the server. The
+   * supplied key is normalized (quotes / "Bearer " / whitespace stripped)
+   * so a careless paste still authenticates. */
   const saved = readRuntimeLlmConfig();
-  let key = parsed.data.apiKey || undefined;
+  const suppliedKey = parsed.data.apiKey ? sanitizeApiKey(parsed.data.apiKey) : "";
+  let key = suppliedKey || undefined;
   if (!key) {
     if (saved?.provider === provider) key = saved.apiKey;
     else if (parsed.data.baseUrl) key = reusableSavedKey(provider, parsed.data.baseUrl);
@@ -238,7 +242,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ ok: true, models, catalogueSupported: true });
   } catch (err) {
-    const friendly = friendlyError(err);
+    const friendly = friendlyError(err, meta?.name);
     return NextResponse.json({ ok: false, error: friendly.message }, { status: friendly.status ?? 502 });
   }
 }

@@ -29,6 +29,7 @@ import {
   writeRuntimeLlmConfig,
 } from "@/lib/agent/llmConfigStore";
 import { resolveLlmConfig } from "@/lib/agent/llm";
+import { sanitizeApiKey } from "@/lib/agent/providers";
 import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
 import { adminGuardState, checkAdminGuard, clientKey, rateLimit } from "@/lib/server/guard";
 
@@ -134,6 +135,9 @@ export async function POST(request: Request) {
 
   const { baseUrl: rawBase, apiKey: rawKey, model, extraHeaders, provider, routing } = parsed.data;
   const baseUrl = rawBase.replace(/\/+$/, "");
+  /* Normalize pasted credentials (quotes / "Bearer " / whitespace) so a
+   * careless paste never gets stored and silently breaks auth. */
+  const sanitizedKey = sanitizeApiKey(rawKey);
 
   /* SSRF guard — Ollama is the only provider allowed to target this machine. */
   try {
@@ -147,7 +151,7 @@ export async function POST(request: Request) {
    * the operator is re-saving the same provider + endpoint (model or
    * header changes must not demand retyping credentials). The raw key is
    * never echoed back to the client. */
-  let apiKey = rawKey;
+  let apiKey = sanitizedKey;
   if (provider === "ollama" && (!apiKey || apiKey === "ollama-local")) {
     /* Ollama ignores credentials — keep the documented placeholder so the
      * saved config always loads. */

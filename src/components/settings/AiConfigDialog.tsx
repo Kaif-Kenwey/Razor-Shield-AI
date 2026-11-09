@@ -47,7 +47,7 @@ import { useAppStore, type LlmStatus } from "@/store/appStore";
 import { getAdminToken, setAdminToken } from "@/services/api";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { PROVIDERS, providerById, type ProviderId } from "@/lib/agent/providers";
+import { PROVIDERS, providerById, sanitizeApiKey, type ProviderId } from "@/lib/agent/providers";
 import {
   AUTOMATIC_FREE_MODEL_ID,
   ModelCombobox,
@@ -164,7 +164,11 @@ export function AiConfigDialog() {
     normUrl(status?.baseUrl ?? "") === normUrl(baseUrl);
   const savedKeyApplies = Boolean(status?.hasRuntimeConfig) && (savedSameProvider || savedSameBaseUrl);
 
-  const keyLen = apiKey.trim().length;
+  /* Same normalization the server applies to pasted keys (quotes /
+   * "Bearer " / whitespace stripped) — what gets tested/saved is exactly
+   * what would authenticate. */
+  const normalizedKey = sanitizeApiKey(apiKey);
+  const keyLen = normalizedKey.length;
   /* Key rules (server-enforced): a typed key always works; an EMPTY key
    * field also works when the saved config covers this provider/endpoint
    * — the server reuses the stored credential without ever echoing it.
@@ -195,6 +199,13 @@ export function AiConfigDialog() {
     );
   })();
 
+  /** Heuristic paste check — the well-known provider prefix catches the
+   *  classic mistake of pasting a key from a DIFFERENT provider. Never
+   *  enforced: providers can change formats, so it is advice only. */
+  const keyPrefixMismatch = Boolean(
+    meta?.keyPrefix && keyLen >= 8 && !normalizedKey.startsWith(meta.keyPrefix),
+  );
+
   const baseUrlValid = isValidHttpUrl(baseUrl.trim());
   const modelValid = meta?.hasCatalogue ? model.trim().length > 0 : true;
   const canTest = baseUrlValid && modelValid && keyValid && !headersError;
@@ -204,7 +215,7 @@ export function AiConfigDialog() {
    * Key that travels with test/save calls: the user's input, or — for
    * keyless local providers — the documented non-secret placeholder.
    */
-  const effectiveApiKey = apiKey.trim() || (meta?.requiresKey ? "" : OLLAMA_PLACEHOLDER_KEY);
+  const effectiveApiKey = normalizedKey || (meta?.requiresKey ? "" : OLLAMA_PLACEHOLDER_KEY);
 
   /* Reset everything when the dialog closes so each session starts fresh. */
   useEffect(() => {
@@ -269,7 +280,7 @@ export function AiConfigDialog() {
             body: JSON.stringify({
               provider: providerId,
               baseUrl: baseUrl.trim() || undefined,
-              apiKey: apiKey.trim() || undefined,
+              apiKey: normalizedKey || undefined,
               extraHeaders: parsedHeaders,
             }),
             signal: AbortSignal.timeout(15_000),
@@ -731,6 +742,13 @@ export function AiConfigDialog() {
                       </a>
                     )}
                   </p>
+                  {keyPrefixMismatch && (
+                    <p role="note" className="rounded-sm border border-risk-medium/40 bg-risk-medium/8 px-2.5 py-1.5 text-[10.5px] leading-snug text-risk-medium">
+                      Heads-up: {meta.name} keys usually start with <span className="font-mono">{meta.keyPrefix}</span> — this one
+                      doesn&apos;t. Double-check you pasted a {meta.name} key and not a key from another provider (a copied
+                      <span className="font-mono"> Bearer </span>prefix or quotes are stripped automatically).
+                    </p>
+                  )}
                   {savedKeyApplies && keyLen === 0 && (
                     <p className="rounded-sm border border-intel/25 bg-intel/8 px-2.5 py-1.5 text-[10.5px] leading-snug text-slate-400">
                       Key already saved server-side (encrypted) — leave the field empty to REUSE it while you change the model

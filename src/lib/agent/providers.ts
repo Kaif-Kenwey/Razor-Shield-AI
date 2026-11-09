@@ -28,6 +28,10 @@ export interface ProviderMeta {
   docsUrl?: string;
   /** Short setup hint shown under the key field. */
   setupHint: string;
+  /** Well-known key prefix from the provider's docs, when one exists —
+   *  drives the "does this look like the right key?" hint. Purely a
+   *  heuristic (providers may change formats); never enforced. */
+  keyPrefix?: string;
   /** Free-tier / pricing note — kept factual, provider wording varies. */
   pricingNote: string;
   /** Is the endpoint local to the machine running the app? */
@@ -47,6 +51,7 @@ export const PROVIDERS: ProviderMeta[] = [
     catalogueNeedsKey: false,
     keyUrl: "https://openrouter.ai/keys",
     docsUrl: "https://openrouter.ai/docs",
+    keyPrefix: "sk-or-",
     setupHint: "Create a key at openrouter.ai/keys — free models work on a $0 balance.",
     pricingNote:
       "Model list is fetched live; FREE labels come from each model's own pricing metadata (prompt+completion = $0). Free models carry provider-specific rate limits.",
@@ -64,6 +69,7 @@ export const PROVIDERS: ProviderMeta[] = [
     catalogueNeedsKey: true,
     keyUrl: "https://aistudio.google.com/apikey",
     docsUrl: "https://ai.google.dev/gemini-api/docs",
+    keyPrefix: "AIza",
     setupHint: "Get a key from Google AI Studio (aistudio.google.com/apikey).",
     pricingNote:
       "The free API plan covers selected models with changing quotas — FREE labels here reflect the live catalogue metadata, not a blanket claim.",
@@ -81,6 +87,7 @@ export const PROVIDERS: ProviderMeta[] = [
     catalogueNeedsKey: true,
     keyUrl: "https://console.groq.com/keys",
     docsUrl: "https://console.groq.com/docs",
+    keyPrefix: "gsk_",
     setupHint: "Create a key at console.groq.com/keys.",
     pricingNote:
       "Some listed models are billed per token — FREE labels come from live metadata only; Groq plan rate limits apply either way.",
@@ -119,4 +126,26 @@ export const PROVIDERS: ProviderMeta[] = [
 
 export function providerById(id: string): ProviderMeta | undefined {
   return PROVIDERS.find((p) => p.id === id);
+}
+
+/**
+ * Normalizes a pasted API key without changing its secret material:
+ * strips surrounding whitespace, quotes, trailing punctuation picked up
+ * from copy-paste, and a leading "Bearer " prefix (a very common paste
+ * mistake that silently breaks authentication). Pure string logic —
+ * client-safe, no storage, no side effects.
+ */
+export function sanitizeApiKey(raw: string): string {
+  let k = raw.trim();
+  // Uniform quotes copied along with the key.
+  if (k.length >= 2 && ((k.startsWith('"') && k.endsWith('"')) || (k.startsWith("'") && k.endsWith("'")))) {
+    k = k.slice(1, -1).trim();
+  }
+  // "Bearer <key>" pasted from a curl command or docs snippet.
+  if (/^bearer\s+/i.test(k)) k = k.replace(/^bearer\s+/i, "").trim();
+  // Trailing sentence punctuation from copying out of docs.
+  k = k.replace(/[.,;]+$/, "");
+  // Real keys contain no whitespace — newlines from multiline pastes break auth.
+  k = k.replace(/\s+/g, "");
+  return k;
 }
