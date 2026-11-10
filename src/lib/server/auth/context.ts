@@ -194,16 +194,30 @@ export async function requirePermission(
 }
 
 /**
- * CSRF defence for cookie-authenticated mutations: browsers send Origin
- * on cross-site (and modern same-origin) POST/PUT/PATCH/DELETE fetches.
- * When an Origin is present it must match the request host — a mismatch
- * means a cross-site request forged against a victim's cookie. Requests
- * without Origin (server-to-server, curl, API clients) are allowed;
- * they cannot silently use a victim's browser cookies.
+ * CSRF defence for cookie-authenticated mutations.
+ *
+ * Primary signal: `Sec-Fetch-Site` — set by the BROWSER itself (a
+ * forbidden header name, unforgeable by page JavaScript) describing
+ * whether the request originates from the same site. "same-origin" and
+ * "none" (user-initiated navigation) are allowed; "cross-site"/"same-site"
+ * are rejected. This stays correct even behind proxies that rewrite the
+ * Host header (e.g. preview gateways), where Origin/Host comparison
+ * breaks.
+ *
+ * Fallback (browsers without Fetch Metadata, curl, server-to-server):
+ * compare the Origin header against the request host when Origin is
+ * present; requests without Origin cannot silently carry a victim's
+ * cookies, so they are allowed.
  */
 export function assertSameOrigin(request: Request): NextResponse | null {
   const method = request.method.toUpperCase();
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return null;
+
+  const fetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
+  if (fetchSite) {
+    if (fetchSite === "same-origin" || fetchSite === "none") return null;
+    return forbidden(`Cross-site ${method} rejected (CSRF protection, sec-fetch-site=${fetchSite}).`);
+  }
 
   const origin = request.headers.get("origin");
   if (!origin) return null; // non-browser client
