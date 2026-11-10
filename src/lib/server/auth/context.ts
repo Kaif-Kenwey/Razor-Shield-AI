@@ -210,7 +210,11 @@ export function assertSameOrigin(request: Request): NextResponse | null {
 
   const host =
     request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
-    request.headers.get("host");
+    request.headers.get("host") ||
+    /* Programmatically-built Requests (integration tests, internal calls)
+     * may omit Host — the request URL's own authority is the server's
+     * address and cannot be attacker-chosen. */
+    new URL(request.url).host;
   if (!host) return forbidden("Missing host header.");
 
   let originHost: string;

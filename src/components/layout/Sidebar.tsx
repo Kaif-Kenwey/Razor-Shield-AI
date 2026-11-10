@@ -14,16 +14,17 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { StatusDot } from "@/components/shared/StatusDot";
 import { useAppStore } from "@/store/appStore";
+import { useAuthStore } from "@/store/authStore";
 import type { ViewKey } from "@/types";
 import { cn } from "@/lib/utils";
 
-const NAV: { key: ViewKey; label: string; icon: LucideIcon; hint: string }[] = [
+const NAV: { key: ViewKey; label: string; icon: LucideIcon; hint: string; permission?: string }[] = [
   { key: "overview", label: "Overview", icon: LayoutGrid, hint: "Live risk command center" },
   { key: "investigations", label: "Investigations", icon: FolderSearch, hint: "Active case queue" },
   { key: "transactions", label: "Transactions", icon: ArrowLeftRight, hint: "Full payment ledger" },
-  { key: "datastudio", label: "Dataset Studio", icon: FileUp, hint: "Import & score real data" },
+  { key: "datastudio", label: "Dataset Studio", icon: FileUp, hint: "Import & score real data", permission: "datasets:read" },
   { key: "intelligence", label: "Risk Intelligence", icon: BarChart3, hint: "Patterns & distributions" },
-  { key: "model", label: "Detection Benchmark", icon: Cpu, hint: "Demo engine metrics" },
+  { key: "model", label: "Detection Benchmark", icon: Cpu, hint: "Demo engine metrics", permission: "evaluation:read" },
   { key: "system", label: "System", icon: Server, hint: "Engine & service health" },
 ];
 
@@ -33,6 +34,10 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const connection = useAppStore((s) => s.connection);
   const decisions = useAppStore((s) => s.decisions);
   const transactions = useAppStore((s) => s.transactions);
+  /* Permission-aware entry points. Display gating only — the server
+   * independently enforces every permission, so a hidden item is UX,
+   * not the security boundary. Absent permission lists fail open here. */
+  const permissions = useAuthStore((s) => s.permissions);
 
   const activeCases = transactions.filter(
     (t) => (t.status === "INVESTIGATING" || t.status === "UNDER_REVIEW") && !decisions[t.id]
@@ -56,7 +61,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
       {/* Primary navigation */}
       <nav className="flex-1 px-3 space-y-0.5" aria-label="Primary">
-        {NAV.map((item) => {
+        {NAV.filter((item) => !item.permission || permissions.length === 0 || permissions.includes(item.permission)).map((item) => {
           const active = view === item.key || (isInvestigating && item.key === "investigations");
           const Icon = item.icon;
           return (

@@ -11,6 +11,7 @@ import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { AppShell } from "@/components/layout/AppShell";
+import { AuthGate } from "@/components/auth/AuthGate";
 import { HeroLanding } from "@/components/dashboard/HeroLanding";
 import { OverviewView } from "@/components/dashboard/OverviewView";
 import { InvestigationsView } from "@/components/investigation/InvestigationsView";
@@ -79,12 +80,21 @@ function CurrentView() {
   );
 }
 
-export default function Home() {
+/** Boots the live ledger. Mounted INSIDE AuthGate so the first fetch only
+ * fires once the session exists — an unauthenticated 401 at mount would
+ * otherwise wedge the boot in "connecting" until reload. */
+function LiveLedgerBoot() {
   useLiveTransactions();
+  return null;
+}
 
+export default function Home() {
   return (
-    <AppShell>
-      <CurrentView />
-    </AppShell>
+    <AuthGate>
+      <LiveLedgerBoot />
+      <AppShell>
+        <CurrentView />
+      </AppShell>
+    </AuthGate>
   );
 }

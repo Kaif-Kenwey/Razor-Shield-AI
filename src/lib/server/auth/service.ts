@@ -275,7 +275,7 @@ export interface LoginMfa {
 export async function login(
   emailRaw: string,
   password: string,
-  meta: { ip?: string; userAgent?: string },
+  meta: { ip?: string; userAgent?: string } = {},
 ): Promise<ServiceResult<LoginOutput | LoginMfa>> {
   const email = normalizeEmail(emailRaw ?? "");
   if (!email || !password) return fail(400, "Email and password are required.");

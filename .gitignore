@@ -53,3 +53,8 @@ db/llm-config.json
 
 # LLM key encryption secret (machine-local, never commit)
 db/.llm-secret
+# Shared secret-box key (AES-256-GCM for LLM keys + TOTP secrets) — never commit
+db/.secret-box-key
+db/*.dev-backup
+db/*.bak
+db/*.old-saas-migrate

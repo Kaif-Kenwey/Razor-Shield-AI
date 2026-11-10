@@ -88,6 +88,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     | (T & { ok?: boolean; error?: string })
     | null;
   if (!res.ok || (data && data.ok === false)) {
+    /* Session expired/revoked anywhere in the app → let AuthGate react. */
+    if (res.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("razorshield:unauthorized"));
+    }
     const err = new Error(data?.error || `RazorShield API ${res.status}: ${path}`) as Error & {
       adminRequired?: boolean;
     };

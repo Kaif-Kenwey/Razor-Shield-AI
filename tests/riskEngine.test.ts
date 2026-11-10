@@ -1,7 +1,7 @@
 /**
  * RazorShield AI — engine & platform test suite (bun test).
  *
- * 15 tests covering what DEMO.md promises:
+ * 21 tests covering what DEMO.md and docs/saas promise:
  *   - future-data leakage prevention (causal scoring)
  *   - Dataset Studio ⇔ ledger scoring consistency
  *   - duplicate + invalid-row import handling
@@ -11,6 +11,9 @@
  *   - LLM failure → deterministic heuristic fallback (recorded)
  *   - analyst decision / note / audit persistence across a FRESH
  *     database connection (the "restart" proof)
+ *   - SaaS foundation: registration→org provisioning, password policy,
+ *     account lockout, CROSS-TENANT isolation, sealed-secret tamper
+ *     resistance, hashed session tokens at rest
  *
  * ISOLATION
  *   Tests never touch the app's real database or the operator's saved LLM
@@ -63,6 +66,15 @@ type AnyDb = {
   investigation: any;
   caseNote: any;
   auditEvent: any;
+  datasetRow: any;
+  dataset: any;
+  llmProviderConfig: any;
+  invitation: any;
+  membership: any;
+  session: any;
+  verificationToken: any;
+  organisation: any;
+  user: any;
   $transaction: any;
   $disconnect: any;
 };
@@ -71,12 +83,29 @@ let db: AnyDb;
 let PrismaClientCtor: any;
 let scoreBatch: (inputs: any[]) => { rows: any[] };
 let FLAG_THRESHOLD: number;
-let scoreAndPersistTransaction: (input: any) => Promise<any>;
-let loadServerCaseContext: (id: string) => Promise<any>;
+let scoreAndPersistTransaction: (input: any, organisationId: string) => Promise<any>;
+let loadServerCaseContext: (id: string, organisationId: string) => Promise<any>;
 let importPost: (request: Request) => Promise<Response>;
 let investigatePost: (request: Request) => Promise<Response>;
 let txnPatch: (request: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
 let notesPost: (request: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+let authRegister: (input: {
+  name: string;
+  email: string;
+  password: string;
+  organisationName?: string;
+  invitationToken?: string;
+}) => Promise<any>;
+let authLogin: (email: string, password: string) => Promise<any>;
+
+/* ------------------------------------------------------------------ */
+/* SaaS fixtures — identity created through the REAL auth service      */
+/* ------------------------------------------------------------------ */
+
+let ORG_ID = "";
+let USER_ID = "";
+let USER_EMAIL = "";
+let SESSION_TOKEN = "";
 
 /** Run-unique suffix — reruns never collide with leftover rows. */
 const RUN = `T${Date.now().toString(36)}`;
@@ -84,13 +113,43 @@ const BASE = Date.UTC(2024, 2, 15, 10, 0, 0); // 2024-03-15T10:00:00Z
 const at = (hOffset: number, min = 0) =>
   new Date(BASE + hOffset * 3_600_000 + min * 60_000).toISOString();
 
-/** Empty the isolated ledger so every test starts from a known state. */
+/** Empty the isolated database (business + identity tables) so every test
+ * starts from a known state. FK-safe order: children first. */
 async function resetLedger(): Promise<void> {
+  await db.datasetRow.deleteMany({});
+  await db.dataset.deleteMany({});
   await db.auditEvent.deleteMany({});
   await db.caseNote.deleteMany({});
   await db.investigation.deleteMany({});
   await db.transaction.deleteMany({});
   await db.customer.deleteMany({});
+  await db.llmProviderConfig.deleteMany({});
+  await db.invitation.deleteMany({});
+  await db.membership.deleteMany({});
+  await db.session.deleteMany({});
+  await db.verificationToken.deleteMany({});
+  await db.organisation.deleteMany({});
+  await db.user.deleteMany({});
+}
+
+/** Surrogate row for an external (UI-facing) transaction id in THIS org. */
+async function txnRow(externalId: string) {
+  return db.transaction.findFirst({ where: { organisationId: ORG_ID, externalId } });
+}
+
+/** Authenticated, same-origin request — routes now require a session
+ * (opaque cookie token) and mutations must present a matching Origin. */
+function authed(url: string, body: unknown, ip: string, method = "POST"): Request {
+  return new Request(url, {
+    method,
+    headers: {
+      "content-type": "application/json",
+      "x-forwarded-for": ip,
+      cookie: `rs_session=${SESSION_TOKEN}`,
+      origin: "http://localhost",
+    },
+    body: JSON.stringify(body),
+  });
 }
 
 /** Minimal EngineInput builder. */
@@ -152,7 +211,28 @@ beforeAll(async () => {
   const notesRoute = await import("@/app/api/transactions/[id]/notes/route");
   notesPost = notesRoute.POST;
 
+  const authService = await import("@/lib/server/auth/service");
+  authRegister = authService.register;
+  authLogin = authService.login;
+
   await resetLedger();
+
+  /* Identity fixtures through the REAL service paths (bcrypt, audit). */
+  const reg = await authRegister({
+    name: "Test Analyst",
+    email: `${RUN.toLowerCase()}@test.local`,
+    password: "test-password-123",
+    organisationName: `Test Org ${RUN}`,
+  });
+  if (!reg.ok) throw new Error(`test identity bootstrap failed: ${reg.error}`);
+  ORG_ID = reg.value.organisation!.id;
+  USER_ID = reg.value.user.id;
+  USER_EMAIL = reg.value.user.email;
+  const session = await authService.createSession(USER_ID, {
+    ip: "10.0.0.9",
+    userAgent: "bun-test",
+  });
+  SESSION_TOKEN = session.token;
 });
 
 afterAll(async () => {
@@ -287,7 +367,7 @@ describe("ledger ingestion (isolated DB)", () => {
         paymentMethod: "UPI",
         timestamp: s.iso,
         dataSource: "import",
-      });
+      }, ORG_ID);
       ledgerScores.set(s.id, out.riskScore);
     }
 
@@ -314,7 +394,7 @@ describe("ledger ingestion (isolated DB)", () => {
       merchant: "Dup Mart",
     };
     const first = await importPost(
-      post("http://localhost/api/transactions/import", { datasetName: "dup-test", rows: [row] }, "10.7.0.1"),
+      authed("http://localhost/api/transactions/import", { datasetName: "dup-test", rows: [row] }, "10.7.0.1"),
     );
     const firstBody = (await first.json()) as any;
     expect(firstBody.ok).toBe(true);
@@ -322,7 +402,7 @@ describe("ledger ingestion (isolated DB)", () => {
 
     // Tamper the amount in the replay — the duplicate must NOT overwrite.
     const second = await importPost(
-      post(
+      authed(
         "http://localhost/api/transactions/import",
         { datasetName: "dup-test", rows: [{ ...row, amount: 999_999 }] },
         "10.7.0.2",
@@ -332,14 +412,14 @@ describe("ledger ingestion (isolated DB)", () => {
     expect(secondBody.imported).toBe(0);
     expect(secondBody.duplicates).toContain(`${RUN}-DUP1`);
 
-    const stored = await db.transaction.findUnique({ where: { id: `TXN_${RUN}-DUP1` } });
+    const stored = await txnRow(`TXN_${RUN}-DUP1`);
     expect(stored?.amount).toBe(5_000);
   }, 60_000);
 
   test("8. invalid rows are reported and never poison the batch", async () => {
     const cust = `${RUN}-C8`;
     const res = await importPost(
-      post(
+      authed(
         "http://localhost/api/transactions/import",
         {
           datasetName: "invalid-row-test",
@@ -362,7 +442,7 @@ describe("ledger ingestion (isolated DB)", () => {
   test("9. ground-truth labels survive the import", async () => {
     const cust = `${RUN}-C9`;
     const res = await importPost(
-      post(
+      authed(
         "http://localhost/api/transactions/import",
         {
           datasetName: "label-test",
@@ -376,8 +456,8 @@ describe("ledger ingestion (isolated DB)", () => {
     );
     const body = (await res.json()) as any;
     expect(body.imported).toBe(2);
-    const fraud = await db.transaction.findUnique({ where: { id: `TXN_${RUN}-L1` } });
-    const legit = await db.transaction.findUnique({ where: { id: `TXN_${RUN}-L2` } });
+    const fraud = await txnRow(`TXN_${RUN}-L1`);
+    const legit = await txnRow(`TXN_${RUN}-L2`);
     expect(fraud?.label).toBe(1);
     expect(legit?.label).toBe(0);
   }, 60_000);
@@ -400,12 +480,12 @@ describe("investigation context (server-only facts)", () => {
       paymentMethod: "UPI",
       timestamp: at(0),
       dataSource: "import",
-    });
+    }, ORG_ID);
 
     // A malicious body smuggles amount/score/signals — the route accepts
     // ONLY transactionId, so these must be ignored end to end.
     const res = await investigatePost(
-      post(
+      authed(
         "http://localhost/api/investigate",
         {
           transactionId: `${RUN}-TAM1`,
@@ -422,14 +502,14 @@ describe("investigation context (server-only facts)", () => {
     expect(String(body.reason)).toContain("heuristic");
 
     // …and the SERVER-side context still carries the real stored facts.
-    const serverCase = await loadServerCaseContext(`${RUN}-TAM1`);
+    const serverCase = await loadServerCaseContext(`${RUN}-TAM1`, ORG_ID);
     expect(serverCase).not.toBeNull();
     expect(serverCase.context.transaction.amount).toBe(42.5);
     expect(serverCase.context.transaction.merchant).toBe("Truth Mart");
 
     // Unknown ids are rejected outright.
     const missing = await investigatePost(
-      post("http://localhost/api/investigate", { transactionId: `${RUN}-DOES-NOT-EXIST` }, "10.10.0.2"),
+      authed("http://localhost/api/investigate", { transactionId: `${RUN}-DOES-NOT-EXIST` }, "10.10.0.2"),
     );
     expect(missing.status).toBe(404);
   }, 60_000);
@@ -441,17 +521,17 @@ describe("investigation context (server-only facts)", () => {
     await scoreAndPersistTransaction({
       id: `${RUN}-AGG0`, amount: 500, customerId: cust, timestamp: at(-1),
       merchant: "Hist Mart", device: "d11", location: "Nagpur", paymentMethod: "UPI", dataSource: "import",
-    });
+    }, ORG_ID);
     await scoreAndPersistTransaction({
       id: `${RUN}-AGG1`, amount: 100_000, customerId: cust, timestamp: at(0),
       merchant: "Case Mart", device: "d11", location: "Nagpur", paymentMethod: "UPI", dataSource: "import",
-    });
+    }, ORG_ID);
     await scoreAndPersistTransaction({
       id: `${RUN}-AGG2`, amount: 900_000, customerId: cust, timestamp: at(1),
       merchant: "Future Mart", device: "d11", location: "Nagpur", paymentMethod: "UPI", dataSource: "import",
-    });
+    }, ORG_ID);
 
-    const serverCase = await loadServerCaseContext(`${RUN}-AGG1`);
+    const serverCase = await loadServerCaseContext(`${RUN}-AGG1`, ORG_ID);
     expect(serverCase).not.toBeNull();
     expect(serverCase.context.customer.transactionCount).toBe(1); // not 2, not 3
     expect(serverCase.context.customer.avgTransaction).toBe(500); // excludes self (100k) & future (900k)
@@ -459,7 +539,7 @@ describe("investigation context (server-only facts)", () => {
   }, 60_000);
 
   test("12. account age is Unknown without a genuine account-opening date", async () => {
-    const serverCase = await loadServerCaseContext(`${RUN}-AGG1`);
+    const serverCase = await loadServerCaseContext(`${RUN}-AGG1`, ORG_ID);
     expect(serverCase).not.toBeNull();
     // Customer.createdAt is the RazorShield record-creation time — NOT a
     // bank account open date. The context must not present it as one.
@@ -480,13 +560,16 @@ describe("fallback & persistence (isolated DB)", () => {
     process.env.LLM_MODEL = "test-model";
     try {
       const res = await investigatePost(
-        post("http://localhost/api/investigate", { transactionId: `${RUN}-TAM1` }, "10.13.0.1"),
+        authed("http://localhost/api/investigate", { transactionId: `${RUN}-TAM1` }, "10.13.0.1"),
       );
       const body = (await res.json()) as any;
       expect(body.ok).toBe(false);
       expect(String(body.reason)).toContain("falling back");
 
-      const inv = await db.investigation.findUnique({ where: { transactionId: `${RUN}-TAM1` } });
+      const persistedTxn = await txnRow(`${RUN}-TAM1`);
+      const inv = persistedTxn
+        ? await db.investigation.findUnique({ where: { transactionId: persistedTxn.id } })
+        : null;
       expect(inv?.mode).toBe("heuristic");
       expect(String(inv?.fallbackReason)).toContain("LLM call failed");
       expect(inv?.recommendedAction).toBe("REVIEW");
@@ -502,24 +585,25 @@ describe("fallback & persistence (isolated DB)", () => {
     await scoreAndPersistTransaction({
       id: `${RUN}-PERS1`, amount: 58_000, customerId: cust, timestamp: at(0),
       merchant: "Persist Mart", device: "d14", location: "Delhi", paymentMethod: "Credit Card", dataSource: "import",
-    });
+    }, ORG_ID);
 
     const patchRes = await txnPatch(
-      post(
+      authed(
         `http://localhost/api/transactions/${RUN}-PERS1`,
-        { decision: "BLOCK", note: "Confirmed mule pattern — blocked", analystId: "RK" },
+        { decision: "BLOCK", note: "Confirmed mule pattern — blocked" },
         "10.14.0.1",
-      ) as Request,
+        "PATCH",
+      ),
       { params: Promise.resolve({ id: `${RUN}-PERS1` }) },
     );
     expect(((await patchRes.json()) as any).ok).toBe(true);
 
     const noteRes = await notesPost(
-      post(
+      authed(
         `http://localhost/api/transactions/${RUN}-PERS1/notes`,
-        { text: "Customer could not explain the beneficiary", analystId: "RK" },
+        { text: "Customer could not explain the beneficiary" },
         "10.14.0.2",
-      ) as Request,
+      ),
       { params: Promise.resolve({ id: `${RUN}-PERS1` }) },
     );
     expect(((await noteRes.json()) as any).ok).toBe(true);
@@ -528,8 +612,8 @@ describe("fallback & persistence (isolated DB)", () => {
     // file) must see the decision, the note and the resolution timestamp.
     const fresh = new PrismaClientCtor({ datasourceUrl: process.env.DATABASE_URL });
     try {
-      const row = await fresh.transaction.findUnique({
-        where: { id: `${RUN}-PERS1` },
+      const row = await fresh.transaction.findFirst({
+        where: { organisationId: ORG_ID, externalId: `${RUN}-PERS1` },
         include: { investigation: true },
       });
       expect(row?.investigation?.analystAction).toBe("BLOCK");
@@ -537,7 +621,7 @@ describe("fallback & persistence (isolated DB)", () => {
       expect(row?.investigation?.resolvedAt).not.toBeNull();
       expect(row?.status).toBe("BLOCKED");
 
-      const notes = await fresh.caseNote.findMany({ where: { transactionId: `${RUN}-PERS1` } });
+      const notes = await fresh.caseNote.findMany({ where: { transactionId: row!.id } });
       expect(notes).toHaveLength(1);
       expect(notes[0].text).toContain("beneficiary");
     } finally {
@@ -546,9 +630,11 @@ describe("fallback & persistence (isolated DB)", () => {
   }, 60_000);
 
   test("15. the audit trail records the analyst decision, append-only", async () => {
+    const persisted = await txnRow(`${RUN}-PERS1`);
+    expect(persisted).not.toBeNull();
     const events = async () =>
       db.auditEvent.findMany({
-        where: { transactionId: `${RUN}-PERS1` },
+        where: { transactionId: persisted!.id },
         orderBy: { createdAt: "asc" },
       });
 
@@ -565,10 +651,117 @@ describe("fallback & persistence (isolated DB)", () => {
       before.map((e: any) => e.id),
     );
 
-    // The decision event names the analyst and the action.
+    // The decision event names the AUTHENTICATED actor (from the session,
+    // never a client-supplied analyst id) and the action.
     const decision = before.find((e: any) => e.action === "DECISION_RECORDED");
     const detail = JSON.parse(decision!.detailJson);
     expect(detail.decision).toBe("BLOCK");
-    expect(detail.analystId).toBe("RK");
+    expect(detail.by).toBe(USER_EMAIL);
+    expect(decision!.actorUserId).toBe(USER_ID);
+  }, 30_000);
+});
+
+/* ================================================================== */
+/* 5 — SaaS foundation: identity, tenancy, secrets                     */
+/* ================================================================== */
+
+describe("SaaS foundation — identity, tenancy, secrets", () => {
+  test("16. registration provisions an organisation with an OWNER membership", async () => {
+    const email = `${RUN.toLowerCase()}-saas@test.local`;
+    const res = await authRegister({
+      name: "SaaS Owner",
+      email,
+      password: "owner-password-1",
+      organisationName: `SaaS Org ${RUN}`,
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.organisation).not.toBeNull();
+      expect(res.value.role).toBe("OWNER");
+      const membership = await db.membership.findFirst({ where: { userId: res.value.user.id } });
+      expect(membership?.role).toBe("OWNER");
+      expect(membership?.organisationId).toBe(res.value.organisation!.id);
+    }
+  }, 30_000);
+
+  test("17. weak passwords are rejected by policy", async () => {
+    const res = await authRegister({
+      name: "Weak Password",
+      email: `${RUN.toLowerCase()}-weak@test.local`,
+      password: "short",
+      organisationName: `Weak Org ${RUN}`,
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.status).toBe(400);
+  }, 30_000);
+
+  test("18. five failed logins lock the account — even the right password then fails", async () => {
+    const email = `${RUN.toLowerCase()}-lock@test.local`;
+    const reg = await authRegister({
+      name: "Lockout Analyst",
+      email,
+      password: "lockout-pass-1",
+      organisationName: `Lockout Org ${RUN}`,
+    });
+    expect(reg.ok).toBe(true);
+
+    for (let i = 0; i < 5; i++) {
+      const attempt = await authLogin(email, "definitely-wrong-password");
+      expect(attempt.ok).toBe(false);
+    }
+    // Correct password AFTER lockout must still be refused (429).
+    const locked = await authLogin(email, "lockout-pass-1");
+    expect(locked.ok).toBe(false);
+    if (!locked.ok) expect(locked.status).toBe(429);
+  }, 60_000);
+
+  test("19. CROSS-TENANT ISOLATION: another organisation cannot resolve foreign transactions", async () => {
+    const regB = await authRegister({
+      name: "Other Owner",
+      email: `${RUN.toLowerCase()}-b@test.local`,
+      password: "other-pass-123",
+      organisationName: `Other Org ${RUN}`,
+    });
+    expect(regB.ok).toBe(true);
+    if (!regB.ok) return;
+    const ORG_B = regB.value.organisation!.id;
+
+    // Investigation context: org B sees NOTHING of org A's ledger.
+    const foreignCase = await loadServerCaseContext(`${RUN}-TAM1`, ORG_B);
+    expect(foreignCase).toBeNull();
+
+    // Direct lookup helper: foreign id ≡ missing id (non-disclosing).
+    const { findOrgTransaction } = await import("@/lib/server/ledger");
+    expect(await findOrgTransaction(ORG_B, `${RUN}-PERS1`)).toBeNull();
+    expect(await findOrgTransaction(ORG_ID, `${RUN}-PERS1`)).not.toBeNull();
+
+    // Scoped counts: B's ledger is empty, A's is not — no bleed either way.
+    const countA = await db.transaction.count({ where: { organisationId: ORG_ID } });
+    const countB = await db.transaction.count({ where: { organisationId: ORG_B } });
+    expect(countA).toBeGreaterThan(0);
+    expect(countB).toBe(0);
+  }, 60_000);
+
+  test("20. sealed secrets fail closed on tampering or wrong format", async () => {
+    const { sealSecret, openSecret } = await import("@/lib/server/secretBox");
+    const sealed = sealSecret("provider-key-123");
+    expect(sealed.startsWith("enc:v1:")).toBe(true);
+    expect(openSecret(sealed)).toBe("provider-key-123");
+
+    // Flip the last hex chars — authentication must reject the ciphertext.
+    const tampered = sealed.slice(0, -2) + (sealed.endsWith("aa") ? "bb" : "aa");
+    expect(openSecret(tampered)).toBe("");
+    // Unsealed plaintext is never trusted.
+    expect(openSecret("plaintext-not-sealed")).toBe("");
+    expect(openSecret(null)).toBe("");
+  }, 30_000);
+
+  test("21. session tokens are stored hashed — the raw token never touches the database", async () => {
+    const sessions = await db.session.findMany({ where: { userId: USER_ID } });
+    expect(sessions.length).toBeGreaterThan(0);
+    for (const s of sessions) {
+      expect(s.tokenHash).not.toBe(SESSION_TOKEN);
+      expect(s.tokenHash).toMatch(/^[a-f0-9]{64}$/); // sha-256 hex
+    }
   }, 30_000);
 });

@@ -1,16 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Bell, Check, Menu, Radio, Search, ShieldCheck, Sparkles, UserCog, Volume2, VolumeX } from "lucide-react";
+import { Bell, Menu, Radio, Search, ShieldCheck, Sparkles, Volume2, VolumeX } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { StatusDot } from "@/components/shared/StatusDot";
 import { CommandPalette } from "@/components/layout/CommandPalette";
+import { OrgSwitcher } from "@/components/layout/OrgSwitcher";
+import { AccountMenu } from "@/components/settings/AccountMenu";
 import { useAppStore } from "@/store/appStore";
 import { useToast } from "@/hooks/use-toast";
 import { primeAlertSound } from "@/lib/alertSound";
-import { ANALYSTS, NOTIFICATIONS } from "@/data/mockData";
+import { NOTIFICATIONS } from "@/data/mockData";
 import { relativeTime } from "@/lib/format";
 import type { ViewKey } from "@/types";
 import { cn } from "@/lib/utils";
@@ -46,15 +48,11 @@ export function TopCommandBar({ onOpenMobileNav }: { onOpenMobileNav: () => void
   const unread = useAppStore((s) => s.unreadNotifications);
   const markRead = useAppStore((s) => s.markNotificationsRead);
   const openInvestigation = useAppStore((s) => s.openInvestigation);
-  const signedInId = useAppStore((s) => s.signedInAnalystId);
-  const setSignedInAnalyst = useAppStore((s) => s.setSignedInAnalyst);
   const llmStatus = useAppStore((s) => s.llmStatus);
   const refreshLlmStatus = useAppStore((s) => s.refreshLlmStatus);
   const setAiConfigOpen = useAppStore((s) => s.setAiConfigOpen);
-  const signedIn = ANALYSTS.find((a) => a.id === signedInId) ?? ANALYSTS[0];
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
-  const [profileOpen, setProfileOpen] = useState(false);
   const { toast } = useToast();
 
   /* Investigator mode pill — resolve once on mount (and after the AI panel saves). */
@@ -259,88 +257,10 @@ export function TopCommandBar({ onOpenMobileNav }: { onOpenMobileNav: () => void
             </PopoverContent>
           </Popover>
 
-          {/* Analyst profile — persona switcher */}
-          <Popover open={profileOpen} onOpenChange={setProfileOpen}>
-            <PopoverTrigger asChild>
-              <button
-                className="flex h-8 shrink-0 items-center gap-2.5 rounded-sm border border-line bg-surface-1 pl-1.5 pr-2.5 transition-colors hover:border-line-strong"
-                aria-label={`Signed in as ${signedIn.name} — switch analyst`}
-                aria-expanded={profileOpen}
-              >
-                <span className="flex h-5.5 w-5.5 items-center justify-center rounded-full bg-gradient-to-br from-intel/70 to-intel-soft/60 num text-[10px] font-bold text-white">
-                  {signedIn.initials}
-                </span>
-                <span className="hidden text-[12px] font-medium text-slate-300 md:inline">{signedIn.name}</span>
-                <span className="hidden text-[10px] uppercase tracking-wider text-slate-600 md:inline">{signedIn.level}</span>
-              </button>
-            </PopoverTrigger>
-            <PopoverContent align="end" sideOffset={10} className="w-72 border-line bg-popover p-0">
-              <div className="border-b border-line px-3.5 py-3">
-                <p className="micro text-slate-400">Signed-in analyst</p>
-                <p className="mt-1 text-[11px] leading-snug text-slate-600">
-                  Every decision, note and handoff is recorded against this identity.
-                </p>
-              </div>
-              <ul className="py-1" role="listbox" aria-label="Analyst personas">
-                {ANALYSTS.map((a) => {
-                  const active = a.id === signedInId;
-                  return (
-                    <li key={a.id}>
-                      <button
-                        role="option"
-                        aria-selected={active}
-                        disabled={active}
-                        onClick={() => {
-                          setSignedInAnalyst(a.id);
-                          setProfileOpen(false);
-                          toast({
-                            title: `Now acting as ${a.name} (${a.level})`,
-                            description: "Decisions and notebook entries will carry this identity — switching is itself audit-logged.",
-                          });
-                        }}
-                        className={cn(
-                          "flex w-full items-center gap-2.5 px-3.5 py-2 text-left transition-colors",
-                          active ? "bg-intel/8" : "hover:bg-surface-2"
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border num text-[9.5px] font-semibold",
-                            active ? "border-intel/45 bg-intel/12 text-intel" : "border-line-strong bg-surface-2 text-slate-400"
-                          )}
-                          aria-hidden
-                        >
-                          {a.initials}
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="flex items-center gap-1.5">
-                            <span className="text-[12.5px] font-medium text-slate-200">{a.name}</span>
-                            <span className="num rounded-sm border border-line bg-surface-2 px-1 text-[9px] uppercase tracking-wider text-slate-500">
-                              {a.level}
-                            </span>
-                            {active && <span className="text-[10px] font-medium text-intel">· signed in</span>}
-                          </span>
-                          <span className="mt-0.5 block truncate text-[10.5px] text-slate-600">
-                            {active ? a.role.replace(" · you", "") : `Switch to act as ${a.name.split(" ")[0]}`}
-                          </span>
-                        </span>
-                        {active ? (
-                          <Check className="h-3.5 w-3.5 shrink-0 text-intel" aria-hidden />
-                        ) : (
-                          <UserCog className="h-3.5 w-3.5 shrink-0 text-slate-600" aria-hidden />
-                        )}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-              <div className="border-t border-line px-3.5 py-2">
-                <p className="text-[10px] leading-relaxed text-slate-600">
-                  Persona switch is presentation-only — bounded actions always stay attributable and audited.
-                </p>
-              </div>
-            </PopoverContent>
-          </Popover>
+          {/* Identity & tenant — the authenticated user and their active
+           * organisation; roles/permissions come from the session. */}
+          <OrgSwitcher />
+          <AccountMenu />
         </div>
       </header>
       <CommandPalette />
