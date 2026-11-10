@@ -1,10 +1,26 @@
 # RazorShield AI — demo script (6 steps, ~8 minutes)
 
 The demo proves one loop end-to-end on **real, labelled data**:
-upload → detect → investigate → act → persist → audit.
+sign in → upload → detect → investigate → act → persist → audit.
 Prerequisite state: app running on port 3000, demo mode ON for the live
 feed, and the evaluation file `data/sparkov_anonymised_sample.csv` on hand
 (see `data/PROVENANCE.md` for what it is and how it was built).
+
+## 0. Sign in (Phase 1 SaaS)
+
+The app now requires an authenticated session — every screen and API is
+tenant-scoped and every action is attributed to the signed-in user.
+
+- Use the **"Sign in as demo analyst"** shortcut (shown in dev builds) or
+  enter `demo@razorshield.ai` / `RazorShield!Demo2025` — a synthetic demo
+  organisation, no real data.
+- Point out the honest bits: the **RazorShield Demo** switcher + **Owner**
+  role badge in the top bar (identity comes from the server session, not a
+  client persona), and **Account → Security & devices** showing live session
+  management + MFA enrolment.
+- Multi-tenant proof: **Account → Organisation members** (invite with role),
+  and registration at "Create an organisation" provisions a brand-new
+  isolated tenant whose ledger starts empty.
 
 **Honest framing to open with (30 seconds):**
 > "The detection engine is a deterministic, explainable rules engine —

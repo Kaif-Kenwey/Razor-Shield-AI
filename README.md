@@ -9,6 +9,38 @@ RazorShield AI is a dark-mode **risk operations command center** that turns frau
 
 Every recommendation stays **human-gated**: the AI investigates and recommends (ALLOW / REVIEW / HOLD / BLOCK with a confidence score), the analyst decides, and the system records who did what, when, and why.
 
+---
+
+## Multi-tenant SaaS platform — Phase 1
+
+RazorShield is being rebuilt from a single-tenant demo into a **multi-tenant B2B SaaS
+foundation** (branch `feat/saas-phase-1`; see `docs/saas/` for the full architecture, threat
+model and roadmap). What Phase 1 delivers:
+
+- **Real authentication** — register / sign in / lockout / email verification / password reset /
+  TOTP MFA / revocable device sessions. Passwords are bcrypt-hashed; sessions are server-side
+  and revocable; every audit event names the authenticated human.
+- **Organisations (tenants)** — register creates your own isolated workspace; invite members
+  with one of 8 roles; switch between organisations you belong to. Every business record is
+  org-scoped, and cross-tenant access is a **verified, automated-tested** 404.
+- **Server-enforced RBAC** — Owner / Admin / Fraud Ops Manager / Analyst / Investigator /
+  Auditor / Viewer / Billing Admin, 23 permissions, checked on every API call
+  (`docs/access-control-matrix.md`).
+- **Per-organisation AI configuration** — each tenant connects its own LLM provider; keys are
+  AES-256-GCM sealed at rest and never shared across tenants.
+- **Honest migration + PostgreSQL path** — `scripts/migrate-to-multitenant.ts` (executed) and
+  `scripts/migrate-sqlite-to-postgres.ts` (implemented, **unverified** — no PG instance in the
+  dev sandbox; `docs/saas/postgres-migration.md`).
+- The deterministic risk engine, Dataset Studio and the human-gated investigation loop are
+  preserved unchanged — the SaaS layer wraps them, it does not replace them.
+
+**Demo sign-in** (synthetic data only, seeded automatically in dev): `demo@razorshield.ai` with
+password `RazorShield!Demo2025`. Rotate/remove these credentials before any real deployment —
+the login screen exposes the demo shortcut only in non-production builds.
+
+The fraud engine remains a **deterministic rules engine** (not a trained ML model) and the LLM
+remains an optional investigator — labelling stays honest throughout.
+
 ## Why this exists
 
 Most fraud tooling stops at a score. An analyst gets a number, a queue, and no context — the customer history has to be pulled by hand, the alert argued with, and the write-up done after the fact. Worse, a row-level score physically cannot see a fraud ring: five accounts that each look unremarkable in isolation, all sharing one burner device.
