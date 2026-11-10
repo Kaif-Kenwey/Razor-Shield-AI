@@ -1,6 +1,6 @@
 /**
  * POST /api/transactions/import — push a Dataset Studio analysis into the
- * main ledger.
+ * main ledger (tenant-scoped).
  *
  * The client sends the mapped rows of a scored run (same shape Dataset
  * Studio already holds in memory). Each row goes through the shared
@@ -8,6 +8,11 @@
  * real per-row context — not the batch-file baselines. Duplicates are
  * reported, not silently dropped. dataSource="import" + optional
  * ground-truth labels are preserved for the model-performance endpoint.
+ *
+ * TENANCY: rows land in the authenticated session's organisation only.
+ * Duplicate detection and id allocation are per-org (external ids are
+ * unique WITHIN an organisation, not globally). Requires
+ * "transactions:write".
  *
  * ORDER MATTERS: rows are processed chronologically (unparseable
  * timestamps last, flagged) and each row's scoring context is cut at its
@@ -22,6 +27,7 @@ import { db } from "@/lib/db";
 import { jsonError, writeAudit } from "@/lib/server/ledger";
 import { scoreAndPersistTransaction } from "@/lib/server/scoringService";
 import { clientKey, rateLimit } from "@/lib/server/guard";
+import { guardMutation } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,11 +53,19 @@ const importSchema = z.object({
   chunkTotal: z.number().int().min(1).optional(),
 });
 
-/** Normalise any ledger-conflicting id into a free one. */
-async function freeId(base: string): Promise<string> {
+/**
+ * Normalise any ledger-conflicting id into a free one — uniqueness is
+ * checked WITHIN the caller's organisation (external ids are per-tenant).
+ */
+async function freeId(organisationId: string, base: string): Promise<string> {
   let id = base.toUpperCase().startsWith("TXN_") ? base : `TXN_${base}`;
   let n = 1;
-  while (await db.transaction.findUnique({ where: { id }, select: { id: true } })) {
+  while (
+    await db.transaction.findFirst({
+      where: { organisationId, externalId: id },
+      select: { id: true },
+    })
+  ) {
     id = `${base}_X${n}`;
     n += 1;
   }
@@ -59,6 +73,10 @@ async function freeId(base: string): Promise<string> {
 }
 
 export async function POST(request: Request) {
+  const auth = await guardMutation(request, "transactions:write");
+  if (!auth.ok) return auth.response;
+  const { organisationId, user } = auth.value;
+
   const rl = rateLimit(clientKey(request, "ledger-import"), 12, 60_000);
   if (!rl.allowed) {
     return jsonError(`Imports are rate limited — retry in ${rl.retryAfterSec}s.`, 429);
@@ -110,36 +128,50 @@ export async function POST(request: Request) {
 
   for (const row of ordered) {
     try {
-      const exists = await db.transaction.findUnique({
-        where: { id: row.txnId.toUpperCase().startsWith("TXN_") ? row.txnId : `TXN_${row.txnId}` },
+      /* Duplicate guard is per-org: the same source payment id may exist
+       * in another tenant's ledger without blocking this import. */
+      const exists = await db.transaction.findFirst({
+        where: {
+          organisationId,
+          externalId: row.txnId.toUpperCase().startsWith("TXN_") ? row.txnId : `TXN_${row.txnId}`,
+        },
         select: { id: true },
       });
       if (exists) {
         duplicates.push(row.txnId);
         continue;
       }
-      const id = await freeId(row.txnId);
-      await scoreAndPersistTransaction({
-        id,
-        amount: row.amount,
-        customerId: row.customerId,
-        customerName: row.customerName,
-        merchant: row.merchant,
-        location: row.location,
-        device: row.device,
-        paymentMethod: row.paymentMethod,
-        timestamp: row.timestamp,
-        label: row.label ?? null,
-        dataSource: "import",
-      });
+      const id = await freeId(organisationId, row.txnId);
+      await scoreAndPersistTransaction(
+        {
+          id,
+          amount: row.amount,
+          customerId: row.customerId,
+          customerName: row.customerName,
+          merchant: row.merchant,
+          location: row.location,
+          device: row.device,
+          paymentMethod: row.paymentMethod,
+          timestamp: row.timestamp,
+          label: row.label ?? null,
+          dataSource: "import",
+        },
+        organisationId,
+      );
       imported += 1;
     } catch (err) {
       failed.push({ txnId: row.txnId, error: err instanceof Error ? err.message : "unknown error" });
     }
   }
 
+  /* The import is a HUMAN action (an authenticated analyst pushed the
+   * run into the ledger) — the audit trail attributes the session user. */
   await writeAudit({
-    actor: "SYSTEM",
+    organisationId,
+    actor: "ANALYST",
+    actorType: "HUMAN",
+    actorUserId: user.id,
+    actorName: user.name,
     action: "DATASET_IMPORTED",
     entityType: "Ledger",
     entityId: datasetName,

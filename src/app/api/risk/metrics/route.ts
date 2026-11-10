@@ -1,7 +1,8 @@
 /**
  * /api/risk/metrics — every dashboard statistic, computed live from the
- * stored ledger. No fabricated numbers: when the ledger is empty the
- * response says so and the UI renders the empty state.
+ * stored ledger (tenant-scoped to the authenticated organisation). No
+ * fabricated numbers: when the ledger is empty the response says so and
+ * the UI renders the empty state. Requires "transactions:read".
  *
  * Honesty notes (review fixes):
  *   - `flaggedValue` is the rupee value of rows the engine scored HIGH or
@@ -14,23 +15,30 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { FLAG_THRESHOLD } from "@/lib/riskEngine";
+import { requirePermission } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const auth = await requirePermission(request, "transactions:read");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
+  /* Every aggregate below is pinned to the caller's organisation — the
+   * tenant scope is NOT filterable by the client. */
   const [total, agg, levelRows, statusRows, methodRows, merchantRows, recent, highRiskCustomers, investigations, resolvedRecently] =
     await Promise.all([
-      db.transaction.count(),
-      db.transaction.aggregate({ _sum: { amount: true }, _avg: { riskScore: true } }),
-      db.transaction.groupBy({ by: ["riskLevel"], _count: { _all: true }, _sum: { amount: true } }),
-      db.transaction.groupBy({ by: ["status"], _count: { _all: true } }),
-      db.transaction.groupBy({ by: ["paymentMethod"], _count: { _all: true }, _sum: { amount: true } }),
+      db.transaction.count({ where: { organisationId } }),
+      db.transaction.aggregate({ where: { organisationId }, _sum: { amount: true }, _avg: { riskScore: true } }),
+      db.transaction.groupBy({ by: ["riskLevel"], where: { organisationId }, _count: { _all: true }, _sum: { amount: true } }),
+      db.transaction.groupBy({ by: ["status"], where: { organisationId }, _count: { _all: true } }),
+      db.transaction.groupBy({ by: ["paymentMethod"], where: { organisationId }, _count: { _all: true }, _sum: { amount: true } }),
       db.transaction.groupBy({
         by: ["merchant"],
-        where: { riskLevel: { in: ["HIGH", "CRITICAL"] }, merchant: { not: "" } },
+        where: { organisationId, riskLevel: { in: ["HIGH", "CRITICAL"] }, merchant: { not: "" } },
         _count: { _all: true },
         _sum: { amount: true },
         _avg: { riskScore: true },
@@ -38,13 +46,13 @@ export async function GET() {
         take: 8,
       }),
       db.transaction.findMany({
-        where: { timestamp: { gte: since } },
+        where: { organisationId, timestamp: { gte: since } },
         orderBy: { timestamp: "asc" },
         select: { timestamp: true, amount: true, riskScore: true, riskLevel: true },
       }),
       db.transaction.groupBy({
         by: ["customerId", "customerName"],
-        where: { riskLevel: { in: ["HIGH", "CRITICAL"] } },
+        where: { organisationId, riskLevel: { in: ["HIGH", "CRITICAL"] } },
         _count: { _all: true },
         _avg: { riskScore: true },
         _sum: { amount: true },
@@ -52,13 +60,13 @@ export async function GET() {
         take: 6,
       }),
       db.transaction.findMany({
-        where: { status: { in: ["INVESTIGATING", "UNDER_REVIEW"] } },
+        where: { organisationId, status: { in: ["INVESTIGATING", "UNDER_REVIEW"] } },
         select: { status: true, riskLevel: true, timestamp: true, updatedAt: true },
       }),
       /* Separate query: resolved rows were NOT part of the open-queue
        * slice above, so counting them from it always returned 0. */
       db.transaction.count({
-        where: { status: { in: ["BLOCKED", "ALLOWED", "ON_HOLD"] }, updatedAt: { gte: since } },
+        where: { organisationId, status: { in: ["BLOCKED", "ALLOWED", "ON_HOLD"] }, updatedAt: { gte: since } },
       }),
     ]);
 

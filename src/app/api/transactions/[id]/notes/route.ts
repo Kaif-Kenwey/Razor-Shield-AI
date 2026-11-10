@@ -2,18 +2,19 @@
  * /api/transactions/:id/notes — the analyst notebook, persisted server-side.
  *
  * GET  — every notebook entry for the case, oldest first. Notes live in
- *        SQLite (CaseNote model), not browser state: they survive
- *        reloads, other devices and demo-data clears.
- * POST — append one entry. Trimmed, bounded to 240 chars (same limit the
- *        composer enforces), attributed to the signed-in analyst and
- *        audited (NOTE_ADDED) so the notebook is part of the case record.
+ *        the database (CaseNote model), not browser state.
+ * POST — append one entry. Trimmed, bounded to 240 chars, attributed to
+ *        the AUTHENTICATED user (any client-supplied analyst id is
+ *        ignored) and audited (NOTE_ADDED). Requires
+ *        "investigations:note".
  */
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { jsonError, writeAudit } from "@/lib/server/ledger";
+import { findOrgTransaction, jsonError, writeAudit } from "@/lib/server/ledger";
 import { clientKey, rateLimit } from "@/lib/server/guard";
+import { guardMutation, requirePermission } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,13 +23,17 @@ type RouteCtx = { params: Promise<{ id: string }> };
 
 const MAX_NOTE = 240;
 
-export async function GET(_request: Request, ctx: RouteCtx) {
+export async function GET(request: Request, ctx: RouteCtx) {
+  const auth = await requirePermission(request, "investigations:read");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const { id } = await ctx.params;
-  const exists = await db.transaction.findUnique({ where: { id }, select: { id: true } });
-  if (!exists) return jsonError("Transaction not found", 404);
+  const txn = await findOrgTransaction(organisationId, id, {});
+  if (!txn) return jsonError("Transaction not found", 404);
 
   const notes = await db.caseNote.findMany({
-    where: { transactionId: id },
+    where: { transactionId: txn.id },
     orderBy: { createdAt: "asc" },
     take: 200,
   });
@@ -38,7 +43,10 @@ export async function GET(_request: Request, ctx: RouteCtx) {
     notes: notes.map((n) => ({
       id: n.id,
       text: n.text,
+      /* New entries carry the author's user id + name snapshot; rows
+       * migrated from the single-tenant era keep legacy roster ids. */
       analystId: n.analystId,
+      analystName: n.analystName ?? undefined,
       at: n.createdAt.toISOString(),
     })),
   });
@@ -46,10 +54,15 @@ export async function GET(_request: Request, ctx: RouteCtx) {
 
 const postSchema = z.object({
   text: z.string().trim().min(1, "Note text is required").max(MAX_NOTE),
-  analystId: z.string().trim().min(1).max(16),
+  /* Deprecated: ignored — authorship comes from the session. */
+  analystId: z.string().trim().max(64).optional(),
 });
 
 export async function POST(request: Request, ctx: RouteCtx) {
+  const auth = await guardMutation(request, "investigations:note");
+  if (!auth.ok) return auth.response;
+  const { organisationId, user } = auth.value;
+
   const rl = rateLimit(clientKey(request, "case-note"), 60, 60_000);
   if (!rl.allowed) {
     return jsonError(`Too many notes — retry in ${rl.retryAfterSec}s.`, 429);
@@ -66,24 +79,30 @@ export async function POST(request: Request, ctx: RouteCtx) {
   const parsed = postSchema.safeParse(body);
   if (!parsed.success) return jsonError(parsed.error.issues[0]?.message ?? "Invalid note");
 
-  const exists = await db.transaction.findUnique({ where: { id }, select: { id: true } });
-  if (!exists) return jsonError("Transaction not found", 404);
+  const txn = await findOrgTransaction(organisationId, id, {});
+  if (!txn) return jsonError("Transaction not found", 404);
 
   const note = await db.caseNote.create({
     data: {
-      transactionId: id,
+      organisationId,
+      transactionId: txn.id,
       text: parsed.data.text,
-      analystId: parsed.data.analystId,
+      analystId: user.id,
+      analystName: user.name,
     },
   });
 
   await writeAudit({
+    organisationId,
     actor: "ANALYST",
+    actorType: "HUMAN",
+    actorUserId: user.id,
+    actorName: user.name,
     action: "NOTE_ADDED",
     entityType: "Transaction",
     entityId: id,
-    detail: { analystId: parsed.data.analystId, length: parsed.data.text.length },
-    transactionId: id,
+    detail: { author: user.email, length: parsed.data.text.length },
+    transactionId: txn.id,
   });
 
   return NextResponse.json(
@@ -93,6 +112,7 @@ export async function POST(request: Request, ctx: RouteCtx) {
         id: note.id,
         text: note.text,
         analystId: note.analystId,
+        analystName: note.analystName ?? undefined,
         at: note.createdAt.toISOString(),
       },
     },

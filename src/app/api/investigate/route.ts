@@ -1,22 +1,16 @@
 /**
  * POST /api/investigate — runs the AI investigation agent on a case.
  *
- * TRUST BOUNDARY (hardened): the client sends ONLY `{ transactionId }`.
- * Every fact the investigation engine sees — amount, risk score, signals,
- * customer profile, precedent recall — is loaded from SQLite on the
- * server (`loadServerCaseContext`). A tampered request cannot change the
- * facts: extra fields in the body are ignored, unknown transactions are
- * rejected with 404, and the response echoes the server-built facts so
- * any caller can verify what was actually used.
+ * TRUST BOUNDARY: the client sends ONLY `{ transactionId }`. Every fact
+ * the investigation engine sees — amount, risk score, signals, customer
+ * profile, precedent recall — is loaded from the database on the server,
+ * tenant-scoped to the authenticated organisation. A tampered request
+ * cannot change the facts, and a transaction belonging to another tenant
+ * is indistinguishable from a missing one (404).
  *
- * The response is ALWAYS valid JSON. When the agent is unavailable
- * (no LLM configured, timeout, provider error, malformed output) the
- * route answers { ok: false, reason } and the client falls back to the
- * deterministic heuristic engine — the UI states which mode produced
- * the final analysis either way. LLM verdicts are persisted to the
- * Investigation row (with provider/model/latency) so the mode survives
- * restarts; heuristic fallbacks are persisted only when an LLM was
- * configured but the call failed (the fallback reason is the record).
+ * The LLM provider configuration is the ORGANISATION's own (per-tenant
+ * keys, sealed at rest) — one org can never spend another's credits or
+ * see another's provider settings. Requires "investigations:create".
  */
 
 import { NextResponse } from "next/server";
@@ -28,10 +22,15 @@ import { llmConfigured, resolveLlmConfig } from "@/lib/agent/llm";
 import { loadServerCaseContext } from "@/lib/server/caseContext";
 import { writeAudit } from "@/lib/server/ledger";
 import { db } from "@/lib/db";
+import { guardMutation } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  const auth = await guardMutation(request, "investigations:create");
+  if (!auth.ok) return auth.response;
+  const { organisationId, user } = auth.value;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -52,38 +51,51 @@ export async function POST(request: Request) {
     );
   }
 
-  /* Server-built case context — null means the transaction does not exist. */
-  const serverCase = await loadServerCaseContext(txnId);
+  /* Server-built case context — null covers both "missing" and
+   * "belongs to another tenant" (non-disclosing 404). */
+  const serverCase = await loadServerCaseContext(txnId, organisationId);
   if (!serverCase) {
     return NextResponse.json(
-      { ok: false, reason: `Transaction ${txnId} does not exist in the ledger` },
+      { ok: false, reason: `Transaction ${txnId} does not exist in this organisation's ledger` },
       { status: 404 },
     );
   }
 
-  if (!llmConfigured()) {
+  if (!(await llmConfigured(organisationId))) {
     return NextResponse.json(
-      { ok: false, reason: "LLM not configured — heuristic engine will handle this case" },
+      { ok: false, reason: "LLM not configured for this organisation — heuristic engine will handle this case" },
       { status: 200 },
     );
   }
 
   const started = Date.now();
-  const verdict: AgentVerdict | null = await investigateCase(serverCase.context);
+  const verdict: AgentVerdict | null = await investigateCase(serverCase.context, organisationId);
   const latencyMs = Date.now() - started;
 
   if (!verdict) {
     /* LLM was configured but failed (timeout/provider error/malformed
      * output) — record the fallback so the case file shows WHY the
      * heuristic verdict is the one of record. */
-    await persistInvestigation(serverCase, null, latencyMs);
+    await persistInvestigation(serverCase, null, latencyMs, organisationId);
     return NextResponse.json(
       { ok: false, reason: "Agent did not return a valid verdict — falling back to heuristics" },
       { status: 200 },
     );
   }
 
-  await persistInvestigation(serverCase, verdict, latencyMs);
+  await persistInvestigation(serverCase, verdict, latencyMs, organisationId);
+
+  await writeAudit({
+    organisationId,
+    actor: "AI ENGINE",
+    actorType: "AI",
+    actorUserId: user.id,
+    action: "INVESTIGATION_COMPLETED",
+    entityType: "Investigation",
+    entityId: txnId,
+    detail: { mode: "llm", model: verdict.modelLabel, latencyMs },
+    transactionId: serverCase.factsSummary.transactionRowId,
+  });
 
   return NextResponse.json({
     ok: true,
@@ -100,12 +112,13 @@ async function persistInvestigation(
   serverCase: NonNullable<Awaited<ReturnType<typeof loadServerCaseContext>>>,
   verdict: AgentVerdict | null,
   latencyMs: number,
+  organisationId: string,
 ): Promise<void> {
-  const txnId = serverCase.factsSummary.transactionId;
-  const config = resolveLlmConfig();
+  const rowId = serverCase.factsSummary.transactionRowId;
+  const config = await resolveLlmConfig(organisationId);
 
   try {
-    const existing = await db.investigation.findUnique({ where: { transactionId: txnId } });
+    const existing = await db.investigation.findUnique({ where: { transactionId: rowId } });
     if (existing?.analystAction) return; // analyst decision is final — do not touch
 
     if (verdict) {
@@ -124,23 +137,9 @@ async function persistInvestigation(
         latencyMs,
       };
       await db.investigation.upsert({
-        where: { transactionId: txnId },
-        create: { transactionId: txnId, ...data },
+        where: { transactionId: rowId },
+        create: { organisationId, transactionId: rowId, ...data },
         update: data,
-      });
-      await writeAudit({
-        actor: "AI ENGINE",
-        action: "INVESTIGATION_COMPLETED",
-        entityType: "Investigation",
-        entityId: txnId,
-        detail: {
-          mode: "llm",
-          model: verdict.modelLabel,
-          confidence: verdict.confidence,
-          latencyMs,
-          factsUsed: serverCase.factsSummary,
-        },
-        transactionId: txnId,
       });
     } else {
       /* Configured LLM failed — persist the heuristic fallback reason. */
@@ -153,9 +152,10 @@ async function persistInvestigation(
         latencyMs,
       };
       await db.investigation.upsert({
-        where: { transactionId: txnId },
+        where: { transactionId: rowId },
         create: {
-          transactionId: txnId,
+          organisationId,
+          transactionId: rowId,
           ...data,
           riskAssessment: "Heuristic verdict — LLM was configured but the call failed.",
           recommendedAction: "REVIEW",
@@ -163,12 +163,14 @@ async function persistInvestigation(
         update: data,
       });
       await writeAudit({
+        organisationId,
         actor: "SYSTEM",
+        actorType: "SYSTEM",
         action: "INVESTIGATION_FALLBACK",
         entityType: "Investigation",
-        entityId: txnId,
+        entityId: serverCase.factsSummary.transactionId,
         detail: { fallbackReason: data.fallbackReason, latencyMs },
-        transactionId: txnId,
+        transactionId: rowId,
       });
     }
   } catch {

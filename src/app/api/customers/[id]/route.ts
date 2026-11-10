@@ -1,17 +1,23 @@
 /**
  * /api/customers/:id — one customer profile, fully derived from the
- * stored ledger.
+ * stored ledger (tenant-scoped).
+ *
+ * `:id` is the EXTERNAL customer code, resolved within the authenticated
+ * session's organisation. A customer belonging to another tenant is
+ * indistinguishable from a missing one (404) — non-disclosing by design.
  *
  * Lifetime statistics (count, average, max, flagged counts, device and
  * location discovery) come from SQL aggregates over the WHOLE history —
  * never from a truncated sample presented as lifetime truth (review
  * fix). Only the DISPLAYED history is limited: a 40-row chart sample
  * plus the 25 most recent transactions for the timeline.
+ * Requires "transactions:read".
  */
 
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { jsonError, toUiTransaction } from "@/lib/server/ledger";
+import { jsonError, LEDGER_INCLUDE, toUiTransaction } from "@/lib/server/ledger";
+import { requirePermission } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,6 +27,10 @@ type RouteCtx = { params: Promise<{ id: string }> };
 const OPEN_STATUSES = ["INVESTIGATING", "UNDER_REVIEW"];
 
 export async function GET(request: Request, ctx: RouteCtx) {
+  const auth = await requirePermission(request, "transactions:read");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const { id } = await ctx.params;
   /* Optional time-awareness: `before` (ISO) bounds every aggregate and the
    * history to rows at or before that moment — the case view uses the
@@ -30,59 +40,68 @@ export async function GET(request: Request, ctx: RouteCtx) {
   const before = beforeDate && !Number.isNaN(beforeDate.getTime()) ? beforeDate : null;
   const timeWhere = before ? { timestamp: { lte: before } } : {};
 
-  const customer = await db.customer.findUnique({ where: { id } });
+  /* The URL id is the EXTERNAL customer code — resolve within the tenant.
+   * Missing and foreign-tenant ids return the same 404. */
+  const customer = await db.customer.findFirst({
+    where: { organisationId, externalId: id },
+  });
+  if (!customer) return jsonError("Customer not found", 404);
 
-  /* Lifetime aggregates — bounded result sets, never full-table loads. */
+  /* Lifetime aggregates — bounded result sets, never full-table loads.
+   * customerId below is the resolved SURROGATE row id; every query is
+   * additionally pinned to the organisation. */
   const [lifeAgg, flaggedAgg, openAgg, devices, locations, methods, firstRow] = await Promise.all([
     db.transaction.aggregate({
-      where: { customerId: id, ...timeWhere },
+      where: { organisationId, customerId: customer.id, ...timeWhere },
       _count: { _all: true },
       _avg: { amount: true, riskScore: true },
       _max: { amount: true },
     }),
-    db.transaction.count({ where: { customerId: id, riskLevel: { in: ["HIGH", "CRITICAL"] }, ...timeWhere } }),
-    db.transaction.count({ where: { customerId: id, status: { in: OPEN_STATUSES }, ...timeWhere } }),
+    db.transaction.count({
+      where: { organisationId, customerId: customer.id, riskLevel: { in: ["HIGH", "CRITICAL"] }, ...timeWhere },
+    }),
+    db.transaction.count({
+      where: { organisationId, customerId: customer.id, status: { in: OPEN_STATUSES }, ...timeWhere },
+    }),
     db.transaction.findMany({
-      where: { customerId: id, device: { not: "" }, ...timeWhere },
+      where: { organisationId, customerId: customer.id, device: { not: "" }, ...timeWhere },
       select: { device: true },
       distinct: ["device"],
       take: 20,
     }),
     db.transaction.findMany({
-      where: { customerId: id, location: { not: "" }, ...timeWhere },
+      where: { organisationId, customerId: customer.id, location: { not: "" }, ...timeWhere },
       select: { location: true },
       distinct: ["location"],
       take: 20,
     }),
     db.transaction.groupBy({
       by: ["paymentMethod"],
-      where: { customerId: id, ...timeWhere },
+      where: { organisationId, customerId: customer.id, ...timeWhere },
       _count: { _all: true },
     }),
     db.transaction.findFirst({
-      where: { customerId: id, ...timeWhere },
+      where: { organisationId, customerId: customer.id, ...timeWhere },
       orderBy: { timestamp: "asc" },
       select: { timestamp: true, customerName: true },
     }),
   ]);
 
-  if (!customer && lifeAgg._count._all === 0) {
-    return jsonError("Customer not found", 404);
-  }
-
-  /* Displayed history only — chart sample (40) + recent list (25). */
+  /* Displayed history only — chart sample (40) + recent list (25).
+   * The recent list carries LEDGER_INCLUDE so rows map through
+   * toUiTransaction (external ids, customer profile). */
   const [chartRows, recentRows] = await Promise.all([
     db.transaction.findMany({
-      where: { customerId: id, ...timeWhere },
+      where: { organisationId, customerId: customer.id, ...timeWhere },
       orderBy: { timestamp: "desc" },
       take: 40,
-      select: { timestamp: true, amount: true, riskScore: true, riskLevel: true, id: true },
+      select: { timestamp: true, amount: true, riskScore: true, riskLevel: true, externalId: true },
     }),
     db.transaction.findMany({
-      where: { customerId: id },
+      where: { organisationId, customerId: customer.id },
       orderBy: { timestamp: "desc" },
       take: 25,
-      include: { investigation: true },
+      include: LEDGER_INCLUDE,
     }),
   ]);
 
@@ -136,7 +155,7 @@ export async function GET(request: Request, ctx: RouteCtx) {
         amount: t.amount,
         riskScore: Math.round(t.riskScore),
         flagged: t.riskLevel === "HIGH" || t.riskLevel === "CRITICAL",
-        txnId: t.id,
+        txnId: t.externalId,
       })),
     transactions: recentRows.map(toUiTransaction),
   });

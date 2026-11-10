@@ -42,7 +42,6 @@ export interface LlmStatus {
   /** "verified" = a live probe succeeded against this exact config;
    * "saved" = persisted but never tested. Saved never implies working. */
   verification?: { state: "verified" | "saved"; at: string | null; model: string | null } | null;
-  adminGuard?: "env" | "open";
 }
 
 interface AppState {

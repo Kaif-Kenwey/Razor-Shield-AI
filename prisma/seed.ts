@@ -3,19 +3,27 @@
  *
  *   bun run db:seed
  *
- * Populates the SQLite ledger with a reproducible, clearly-labelled
- * synthetic portfolio (normal traffic + high-value, velocity, new-device,
- * odd-hour, structuring and mule-ring scenarios) through the same
- * server-side scoring service the UI uses. Skips when demo rows already
- * exist — clear only demo-labelled records from the app (System → Clear
- * demo data) or DELETE /api/demo.
+ * Populates the DEMO ORGANISATION's ledger with a reproducible,
+ * clearly-labelled synthetic portfolio (normal traffic + high-value,
+ * velocity, new-device, odd-hour, structuring and mule-ring scenarios)
+ * through the same server-side scoring service the UI uses. Creates the
+ * bootstrap org + demo owner first if needed (same as the migration
+ * bootstrap). Skips when demo rows already exist — clear only
+ * demo-labelled records from the app (System → Clear demo data) or
+ * DELETE /api/demo.
  */
 
+import { db } from "../src/lib/db";
 import { seedDemoData } from "../src/lib/server/demoData";
 
 async function main() {
-  console.log("[RazorShield] seeding synthetic demo portfolio…");
-  const result = await seedDemoData();
+  const org = await db.organisation.upsert({
+    where: { slug: "razorshield-demo" },
+    update: {},
+    create: { name: "RazorShield Demo", slug: "razorshield-demo" },
+  });
+  console.log(`[RazorShield] seeding synthetic demo portfolio into org ${org.name} (${org.id})…`);
+  const result = await seedDemoData(org.id);
   if (result.created === 0 && result.skipped > 0) {
     console.log(`[RazorShield] demo rows already present (${result.skipped}) — nothing to do.`);
     console.log("             Clear them from the app (System → Clear demo data) or DELETE /api/demo.");

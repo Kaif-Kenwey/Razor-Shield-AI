@@ -1,78 +1,85 @@
 /**
- * /api/transactions/:id — one complete ledger record.
+ * /api/transactions/:id — one complete ledger record (tenant-scoped).
+ *
+ * `:id` is the EXTERNAL payment id, resolved within the authenticated
+ * session's organisation. A transaction belonging to another tenant is
+ * indistinguishable from a missing one (404) — non-disclosing by design.
  *
  * GET    — the transaction with customer profile, engine signals, stored
- *          investigation (if any), persisted case notes and the persisted
- *          audit trail.
+ *          investigation (if any), persisted case notes and the audit
+ *          trail. Requires "transactions:read".
  * PATCH  — analyst workflows: status updates, final decisions, case
- *          assignments and SLA-breach escalations, all audited and
- *          persisted to SQLite. The analyst decision also closes the
- *          stored investigation when one exists — and creates one with
- *          the decision attached when it does not.
- * DELETE — restricted cleanup: only demo, manual and imported records can
- *          be deleted, the audit trail itself survives (SetNull).
+ *          assignments and SLA-breach escalations, all audited. The
+ *          actor recorded is the AUTHENTICATED user — any client-supplied
+ *          analyst id is ignored. Requires "investigations:decide" for
+ *          decisions/status and "investigations:assign" for handoffs.
+ * DELETE — restricted cleanup ("transactions:write"); the audit trail
+ *          itself survives (SetNull).
  */
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import {
+  findOrgTransaction,
   investigationFromRow,
   jsonError,
+  LEDGER_INCLUDE,
   parseSignals,
   statusForAction,
   toUiTransaction,
   writeAudit,
 } from "@/lib/server/ledger";
-import { checkAdminGuard, clientKey, rateLimit } from "@/lib/server/guard";
+import { clientKey, rateLimit } from "@/lib/server/guard";
+import { guardMutation, requirePermission } from "@/lib/server/auth/context";
+import { hasPermission } from "@/lib/rbac";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteCtx = { params: Promise<{ id: string }> };
 
-export async function GET(_request: Request, ctx: RouteCtx) {
+export async function GET(request: Request, ctx: RouteCtx) {
+  const auth = await requirePermission(request, "transactions:read");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const { id } = await ctx.params;
 
-  const row = await db.transaction.findUnique({
-    where: { id },
-    include: {
-      investigation: true,
-      customer: true,
-      auditEvents: { orderBy: { createdAt: "desc" }, take: 60 },
-    },
+  const row = await findOrgTransaction(organisationId, id, {
+    auditEvents: { orderBy: { createdAt: "desc" }, take: 60 },
   });
   if (!row) return jsonError("Transaction not found", 404);
 
   /* Customer stats are derived, never stored — computed from the ledger. */
   const [txnCount, agg, devices, locations, history] = await Promise.all([
-    db.transaction.count({ where: { customerId: row.customerId } }),
+    db.transaction.count({ where: { organisationId, customerId: row.customerId } }),
     db.transaction.aggregate({
-      where: { customerId: row.customerId },
+      where: { organisationId, customerId: row.customerId },
       _avg: { amount: true, riskScore: true },
       _max: { amount: true },
     }),
     db.transaction.findMany({
-      where: { customerId: row.customerId, device: { not: "" } },
+      where: { organisationId, customerId: row.customerId, device: { not: "" } },
       select: { device: true },
       distinct: ["device"],
     }),
     db.transaction.findMany({
-      where: { customerId: row.customerId, location: { not: "" } },
+      where: { organisationId, customerId: row.customerId, location: { not: "" } },
       select: { location: true },
       distinct: ["location"],
     }),
     db.transaction.findMany({
-      where: { customerId: row.customerId },
+      where: { organisationId, customerId: row.customerId },
       orderBy: { timestamp: "desc" },
       take: 12,
-      select: { id: true, amount: true, riskScore: true, riskLevel: true, timestamp: true },
+      select: { id: true, externalId: true, amount: true, riskScore: true, riskLevel: true, timestamp: true },
     }),
   ]);
 
   return NextResponse.json({
     ok: true,
-    transaction: toUiTransaction({ ...row, investigation: row.investigation }),
+    transaction: toUiTransaction(row),
     signals: parseSignals(row.signalsJson),
     warnings: (() => {
       try {
@@ -84,15 +91,15 @@ export async function GET(_request: Request, ctx: RouteCtx) {
     })(),
     auditTrail: row.auditEvents.map((e) => ({
       time: e.createdAt.toISOString(),
-      actor: e.actor,
+      actor: e.actorName ?? e.actor,
       action: e.action,
       detail: e.detailJson === "{}" ? undefined : e.detailJson,
     })),
     customer: {
-      id: row.customerId,
-      name: row.customerName || row.customer?.name || row.customerId,
-      kycTier: row.customer?.kycTier ?? "MIN KYC",
-      riskProfile: row.customer?.riskProfile ?? "normal",
+      id: row.customer?.externalId ?? row.customerId,
+      name: row.customerName || row.customerName || row.customer?.externalId || row.customerId,
+      kycTier: "MIN KYC",
+      riskProfile: "normal",
       transactionCount: txnCount,
       avgTransaction: Math.round(agg._avg.amount ?? 0),
       maxTransaction: Math.round(agg._max.amount ?? 0),
@@ -122,14 +129,19 @@ const patchSchema = z.object({
     .optional(),
   decision: z.enum(["ALLOW", "REVIEW", "HOLD", "BLOCK"]).optional(),
   note: z.string().trim().max(1000).optional(),
-  analystId: z.string().trim().max(16).optional(),
-  /** Server-persisted case handoff. null clears the assignment. */
-  assignee: z.string().trim().max(16).nullable().optional(),
-  /** Server-persisted SLA-breach escalation target (analyst roster id). */
-  escalateTo: z.string().trim().max(16).optional(),
+  /* Deprecated: ignored. The actor is the authenticated session user. */
+  analystId: z.string().trim().max(64).optional(),
+  /** Case handoff — the target USER's id (must be an organisation member). */
+  assignee: z.string().trim().max(64).nullable().optional(),
+  /** SLA-breach escalation target user id. */
+  escalateTo: z.string().trim().max(64).optional(),
 });
 
 export async function PATCH(request: Request, ctx: RouteCtx) {
+  const auth = await guardMutation(request, "investigations:decide");
+  if (!auth.ok) return auth.response;
+  const { organisationId, user, role } = auth.value;
+
   const rl = rateLimit(clientKey(request, "txn-patch"), 60, 60_000);
   if (!rl.allowed) {
     return jsonError(`Too many updates — retry in ${rl.retryAfterSec}s.`, 429);
@@ -144,22 +156,36 @@ export async function PATCH(request: Request, ctx: RouteCtx) {
 
   const parsed = patchSchema.safeParse(body);
   if (!parsed.success) return jsonError(parsed.error.issues[0]?.message ?? "Invalid patch");
-  const { status, decision, note, analystId, assignee, escalateTo } = parsed.data;
+  const { status, decision, note, assignee, escalateTo } = parsed.data;
   if (!status && !decision && assignee === undefined && !escalateTo) {
     return jsonError("Provide a status, a decision, an assignee or an escalation target");
   }
 
-  const existing = await db.transaction.findUnique({
-    where: { id },
-    include: { investigation: true },
-  });
+  /* Assignment/escalation needs the assign permission on top of decide. */
+  if ((assignee !== undefined || escalateTo) && !hasPermission(role, "investigations:assign")) {
+    return jsonError('Your role does not grant "investigations:assign" in this organisation.', 403);
+  }
+
+  /* Handoff targets must be organisation members — server-validated. */
+  const memberNames = new Map<string, string>();
+  const targetIds = [assignee, escalateTo].filter((v): v is string => typeof v === "string" && v.length > 0);
+  for (const targetId of targetIds) {
+    const member = await db.membership.findFirst({
+      where: { organisationId, userId: targetId },
+      select: { id: true, user: { select: { name: true } } },
+    });
+    if (!member) return jsonError("Assignment target is not a member of this organisation.", 400);
+    memberNames.set(targetId, member.user.name);
+  }
+
+  const existing = await findOrgTransaction(organisationId, id);
   if (!existing) return jsonError("Transaction not found", 404);
 
   const nextStatus = status ?? (decision ? statusForAction(decision) : existing.status);
 
   const updated = await db.$transaction(async (tx) => {
     const row = await tx.transaction.update({
-      where: { id },
+      where: { id: existing.id },
       data: {
         status: nextStatus,
         ...(decision
@@ -170,6 +196,7 @@ export async function PATCH(request: Request, ctx: RouteCtx) {
                    * recorded BEFORE any AI/heuristic investigation ran
                    * still persists action, note and resolved timestamp. */
                   create: {
+                    organisationId,
                     mode: "heuristic",
                     riskAssessment: "Analyst decision recorded without a prior investigation.",
                     recommendedAction: decision,
@@ -186,64 +213,86 @@ export async function PATCH(request: Request, ctx: RouteCtx) {
               },
             }
           : {}),
-        ...(assignee !== undefined ? { assigneeId: assignee } : {}),
-        ...(escalateTo ? { escalatedTo: escalateTo, assigneeId: escalateTo } : {}),
+        ...(assignee !== undefined
+          ? { assigneeId: assignee || null, assigneeName: assignee ? (memberNames.get(assignee) ?? null) : null }
+          : {}),
+        ...(escalateTo
+          ? { escalatedTo: escalateTo, escalatedName: memberNames.get(escalateTo) ?? null, assigneeId: escalateTo, assigneeName: memberNames.get(escalateTo) ?? null }
+          : {}),
       },
-      include: { investigation: true },
+      include: LEDGER_INCLUDE,
     });
 
     if (decision) {
       await tx.auditEvent.create({
         data: {
+          organisationId,
           actor: "ANALYST",
+          actorType: "HUMAN",
+          actorUserId: user.id,
+          actorName: user.name,
           action: "DECISION_RECORDED",
           entityType: "Transaction",
           entityId: id,
-          detailJson: JSON.stringify({ decision, note: note ?? null, analystId: analystId ?? null }),
-          transactionId: id,
+          detailJson: JSON.stringify({ decision, note: note ?? null, by: user.email }),
+          transactionId: existing.id,
         },
       });
     }
     if (assignee !== undefined) {
       await tx.auditEvent.create({
         data: {
+          organisationId,
           actor: "ANALYST",
+          actorType: "HUMAN",
+          actorUserId: user.id,
+          actorName: user.name,
           action: assignee ? "CASE_ASSIGNED" : "CASE_UNASSIGNED",
           entityType: "Transaction",
           entityId: id,
           detailJson: JSON.stringify({
             assignee,
-            byAnalystId: analystId ?? null,
+            assigneeName: assignee ? (memberNames.get(assignee) ?? null) : null,
+            by: user.email,
           }),
-          transactionId: id,
+          transactionId: existing.id,
         },
       });
     }
     if (escalateTo) {
       await tx.auditEvent.create({
         data: {
+          organisationId,
           actor: "ANALYST",
+          actorType: "HUMAN",
+          actorUserId: user.id,
+          actorName: user.name,
           action: "CASE_ESCALATED",
           entityType: "Transaction",
           entityId: id,
           detailJson: JSON.stringify({
             to: escalateTo,
-            byAnalystId: analystId ?? null,
+            toName: memberNames.get(escalateTo) ?? null,
+            by: user.email,
             reason: "SLA breach — one-click escalation",
           }),
-          transactionId: id,
+          transactionId: existing.id,
         },
       });
     }
     if (nextStatus !== existing.status) {
       await tx.auditEvent.create({
         data: {
+          organisationId,
           actor: decision ? "ANALYST" : "SYSTEM",
+          actorType: decision ? "HUMAN" : "SYSTEM",
+          actorUserId: decision ? user.id : null,
+          actorName: decision ? user.name : null,
           action: "STATUS_CHANGED",
           entityType: "Transaction",
           entityId: id,
           detailJson: JSON.stringify({ from: existing.status, to: nextStatus }),
-          transactionId: id,
+          transactionId: existing.id,
         },
       });
     }
@@ -258,13 +307,12 @@ export async function PATCH(request: Request, ctx: RouteCtx) {
 /* ------------------------------------------------------------------ */
 
 export async function DELETE(request: Request, ctx: RouteCtx) {
-  /* Destructive operation — guarded when this deployment sets ADMIN_TOKEN. */
-  const guard = checkAdminGuard(request);
-  if (!guard.ok) {
-    return jsonError(guard.message, 401, { adminRequired: true });
-  }
+  const auth = await guardMutation(request, "transactions:write");
+  if (!auth.ok) return auth.response;
+  const { organisationId, user } = auth.value;
+
   const { id } = await ctx.params;
-  const existing = await db.transaction.findUnique({ where: { id } });
+  const existing = await findOrgTransaction(organisationId, id);
   if (!existing) return jsonError("Transaction not found", 404);
 
   if (existing.dataSource !== "demo" && existing.dataSource !== "manual" && existing.dataSource !== "import") {
@@ -275,13 +323,17 @@ export async function DELETE(request: Request, ctx: RouteCtx) {
   }
 
   await writeAudit({
-    actor: "SYSTEM",
+    organisationId,
+    actor: "ANALYST",
+    actorType: "HUMAN",
+    actorUserId: user.id,
+    actorName: user.name,
     action: "TRANSACTION_DELETED",
     entityType: "Transaction",
     entityId: id,
     detail: { dataSource: existing.dataSource, amount: existing.amount },
   });
-  await db.transaction.delete({ where: { id } });
+  await db.transaction.delete({ where: { id: existing.id } });
 
   return NextResponse.json({ ok: true });
 }

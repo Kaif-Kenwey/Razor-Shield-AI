@@ -1,19 +1,22 @@
 /**
  * POST /api/llm-config/test — probe an OpenAI-compatible endpoint with a
- * tiny chat completion so the UI can verify credentials.
+ * tiny chat completion so the UI can verify credentials (tenant-scoped).
  *
  * Accepts an explicit config in the body (test-before-save flow); when
- * the body is empty the currently resolved configuration is probed. When
- * the caller supplies an endpoint but no key, the saved key is reused
- * server-side when it belongs to the same endpoint — so re-verifying
- * after a model change never demands retyping credentials.
+ * the body is empty the organisation's currently resolved configuration
+ * is probed. When the caller supplies an endpoint but no key, the org's
+ * saved key is reused server-side when it belongs to the same endpoint —
+ * so re-verifying after a model change never demands retyping
+ * credentials.
  *
- * A successful probe of the CURRENTLY SAVED config records a Verified
- * stamp (endpoint + model); the UI distinguishes Saved from Verified so
- * an untested config never implies a working connection.
+ * A successful probe of the ORG'S CURRENTLY SAVED config records a
+ * Verified stamp (endpoint + model); the UI distinguishes Saved from
+ * Verified so an untested config never implies a working connection.
  *
  * Failures return a human-readable reason, never a stack trace. Every
  * probe passes the shared SSRF URL guard first.
+ * Requires "org:config:manage" — an org's credentials may only be
+ * exercised by members allowed to manage its configuration.
  */
 
 import { NextResponse } from "next/server";
@@ -24,10 +27,15 @@ import {
   type LlmConfig,
 } from "@/lib/agent/llm";
 import { providerById, sanitizeApiKey } from "@/lib/agent/providers";
-import { markRuntimeConfigVerified, readRuntimeLlmConfig, reusableSavedKey } from "@/lib/agent/llmConfigStore";
+import {
+  markOrgConfigVerified,
+  readOrgLlmConfig,
+  reusableOrgSavedKey,
+} from "@/lib/agent/llmConfigStore";
 import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
 import { describeProviderHttpFailure, extractProviderMessage } from "@/lib/server/providerErrors";
 import { clientKey, rateLimit } from "@/lib/server/guard";
+import { guardMutation } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -108,6 +116,10 @@ async function probe(cfg: LlmConfig): Promise<ProbeResult> {
 }
 
 export async function POST(request: Request) {
+  const auth = await guardMutation(request, "org:config:manage");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const rl = rateLimit(clientKey(request, "llm-probe"), 20, 60_000);
   if (!rl.allowed) {
     return NextResponse.json(
@@ -139,10 +151,15 @@ export async function POST(request: Request) {
       );
     }
     let apiKey = providedKey;
-    /* Key reuse: an empty key field against a saved endpoint reuses the
-     * stored credential server-side — the raw key never round-trips. */
+    /* Key reuse: an empty key field against the org's saved endpoint
+     * reuses the stored credential server-side — the raw key never
+     * round-trips. */
     if (!apiKey) {
-      const reused = reusableSavedKey(typeof b.provider === "string" ? b.provider : undefined, providedBase);
+      const reused = await reusableOrgSavedKey(
+        organisationId,
+        typeof b.provider === "string" ? b.provider : undefined,
+        providedBase,
+      );
       if (reused) apiKey = reused;
     }
     cfg = {
@@ -154,7 +171,7 @@ export async function POST(request: Request) {
       provider: typeof b.provider === "string" ? b.provider : undefined,
     };
   } else {
-    cfg = resolveLlmConfig();
+    cfg = await resolveLlmConfig(organisationId);
   }
 
   if (!cfg || !cfg.apiKey) {
@@ -167,11 +184,12 @@ export async function POST(request: Request) {
   const result = await probe(cfg);
 
   /* Verification stamp: only when the probe ran against the config that
-   * is actually saved (same endpoint + model) does it count as Verified. */
+   * is actually saved for THIS organisation (same endpoint + model) does
+   * it count as Verified. */
   if (result.ok) {
-    const saved = readRuntimeLlmConfig();
+    const saved = await readOrgLlmConfig(organisationId);
     if (saved && saved.baseUrl === cfg.baseUrl && saved.model === cfg.model) {
-      markRuntimeConfigVerified(result.model);
+      await markOrgConfigVerified(organisationId, result.model);
     }
   }
 

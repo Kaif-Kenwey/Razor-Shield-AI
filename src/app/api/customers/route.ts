@@ -1,5 +1,9 @@
 /**
- * /api/customers — customer directory with derived statistics.
+ * /api/customers — customer directory with derived statistics (tenant-scoped).
+ *
+ * Every query is bounded to the authenticated session's organisation.
+ * The UI-facing customer id is the EXTERNAL customer code (unique per
+ * tenant); the surrogate row id never leaves the server.
  *
  * GET — paginated profiles calculated live from the ledger. Lifetime
  *       numbers (transaction count, averages, flagged counts, open
@@ -8,11 +12,13 @@
  *       (review fix). Only a small recent sample per displayed customer
  *       (last 25 rows) feeds the "usual device/location/method" modes
  *       and the median, so memory stays flat as the ledger grows.
+ *       Requires "transactions:read".
  */
 
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { jsonError, paginationMeta, paginationSchema } from "@/lib/server/ledger";
+import { paginationMeta, paginationSchema } from "@/lib/server/ledger";
+import { requirePermission } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,6 +26,10 @@ export const dynamic = "force-dynamic";
 const OPEN_STATUSES = ["INVESTIGATING", "UNDER_REVIEW"];
 
 export async function GET(request: Request) {
+  const auth = await requirePermission(request, "transactions:read");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const url = new URL(request.url);
   const parsedPagination = paginationSchema.safeParse({
     page: url.searchParams.get("page") ?? undefined,
@@ -30,9 +40,13 @@ export async function GET(request: Request) {
     : { page: 1, pageSize: 25 };
   const search = url.searchParams.get("q")?.trim();
 
+  /* Tenant scope is NOT optional and never filterable by the client. */
   const where = search
-    ? { OR: [{ id: { contains: search } }, { name: { contains: search } }] }
-    : {};
+    ? {
+        organisationId,
+        OR: [{ externalId: { contains: search } }, { name: { contains: search } }],
+      }
+    : { organisationId };
 
   const [total, customers] = await Promise.all([
     db.customer.count({ where }),
@@ -47,29 +61,30 @@ export async function GET(request: Request) {
   const ids = customers.map((c) => c.id);
   const emptyIds = ids.length === 0;
 
-  /* Lifetime statistics straight from SQL — bounded by the page's ids. */
+  /* Lifetime statistics straight from SQL — bounded by the page's ids.
+   * Every transaction query is pinned to the organisation as well. */
   const [lifeStats, flaggedStats, openStats, lastSeenStats] = emptyIds
     ? [[], [], [], []]
     : await Promise.all([
         db.transaction.groupBy({
           by: ["customerId"],
-          where: { customerId: { in: ids } },
+          where: { organisationId, customerId: { in: ids } },
           _count: { _all: true },
           _avg: { amount: true, riskScore: true },
         }),
         db.transaction.groupBy({
           by: ["customerId"],
-          where: { customerId: { in: ids }, riskLevel: { in: ["HIGH", "CRITICAL"] } },
+          where: { organisationId, customerId: { in: ids }, riskLevel: { in: ["HIGH", "CRITICAL"] } },
           _count: { _all: true },
         }),
         db.transaction.groupBy({
           by: ["customerId"],
-          where: { customerId: { in: ids }, status: { in: OPEN_STATUSES } },
+          where: { organisationId, customerId: { in: ids }, status: { in: OPEN_STATUSES } },
           _count: { _all: true },
         }),
         db.transaction.groupBy({
           by: ["customerId"],
-          where: { customerId: { in: ids } },
+          where: { organisationId, customerId: { in: ids } },
           _max: { timestamp: true },
         }),
       ]);
@@ -84,7 +99,7 @@ export async function GET(request: Request) {
           await Promise.all(
             ids.map((id) =>
               db.transaction.findMany({
-                where: { customerId: id },
+                where: { organisationId, customerId: id },
                 orderBy: { timestamp: "desc" },
                 take: 25,
                 select: {
@@ -129,7 +144,8 @@ export async function GET(request: Request) {
     const flaggedCount = flagged.get(c.id) ?? 0;
 
     return {
-      id: c.id,
+      /* The UI speaks EXTERNAL customer ids — the surrogate key never leaves the server. */
+      id: c.externalId,
       name: c.name,
       kycTier: c.kycTier,
       riskProfile: c.riskProfile,

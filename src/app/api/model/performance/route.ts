@@ -1,17 +1,19 @@
 /**
  * /api/model/performance — engine quality measured on LABELLED ledger rows
- * only. The rule engine is deterministic, not a trained classifier: this
- * endpoint reports how its thresholded recommendations line up with the
- * ground-truth labels that actually exist in the database.
+ * only (tenant-scoped). The rule engine is deterministic, not a trained
+ * classifier: this endpoint reports how its thresholded recommendations
+ * line up with the ground-truth labels that actually exist in the
+ * authenticated organisation's ledger.
  *
  * When fewer than MIN_LABELED labelled rows are stored, the response says
  * `insufficientData` and the UI renders the honest empty state instead of
- * fabricated metrics.
+ * fabricated metrics. Requires "evaluation:read".
  */
 
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { ENGINE_VERSION, FLAG_THRESHOLD } from "@/lib/riskEngine";
+import { requirePermission } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,13 +21,17 @@ export const dynamic = "force-dynamic";
 /** Below this many labelled rows, rates would be noise — say so instead. */
 const MIN_LABELED = 12;
 
-export async function GET() {
+export async function GET(request: Request) {
+  const auth = await requirePermission(request, "evaluation:read");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const labeled = await db.transaction.findMany({
-    where: { label: { not: null } },
+    where: { organisationId, label: { not: null } },
     select: { label: true, recommendation: true, riskScore: true, riskLevel: true, amount: true },
   });
 
-  const totalTransactions = await db.transaction.count();
+  const totalTransactions = await db.transaction.count({ where: { organisationId } });
   /* The detection threshold is the ENGINE'S OWN definition — a row is
    * "predicted fraud" when it scores MEDIUM or above (FLAG_THRESHOLD =
    * 28), the exact band that enters the review flow. Every evaluation

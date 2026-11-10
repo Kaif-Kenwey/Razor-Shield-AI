@@ -1,13 +1,16 @@
 /**
- * /api/transactions — the ledger API.
+ * /api/transactions — the ledger API (tenant-scoped).
  *
- * GET  — paginated, filterable, sortable transactions straight from SQLite.
- *        Filters: risk level, status, customer, search text, date range,
- *        amount range, data source. Returns pagination metadata.
+ * Every query is bounded to the authenticated session's organisation.
+ * The URL-facing id is the EXTERNAL payment id (unique per tenant).
+ *
+ * GET  — paginated, filterable, sortable transactions. Requires
+ *        "transactions:read".
  * POST — validate → de-duplicate → score against stored history via the
- *        shared scoring service → persist → audit. Returns the stored,
- *        scored transaction in the UI shape.
- * PATCH — direct status transition (used by analyst tooling).
+ *        shared scoring service → persist → audit. Requires
+ *        "transactions:write".
+ * PATCH — direct status transition (analyst tooling). Requires
+ *         "investigations:decide".
  */
 
 import { NextResponse } from "next/server";
@@ -15,7 +18,9 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import {
+  findOrgTransaction,
   jsonError,
+  LEDGER_INCLUDE,
   paginationMeta,
   paginationSchema,
   toUiTransaction,
@@ -23,6 +28,7 @@ import {
 } from "@/lib/server/ledger";
 import { newTxnId, scoreAndPersistTransaction } from "@/lib/server/scoringService";
 import { clientKey, rateLimit } from "@/lib/server/guard";
+import { guardMutation, requirePermission } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,6 +40,10 @@ export const dynamic = "force-dynamic";
 const SORT_FIELDS = ["timestamp", "amount", "riskScore"] as const;
 
 export async function GET(request: Request) {
+  const auth = await requirePermission(request, "transactions:read");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const url = new URL(request.url);
   const parsedPagination = paginationSchema.safeParse({
     page: url.searchParams.get("page") ?? undefined,
@@ -58,10 +68,11 @@ export async function GET(request: Request) {
     : "timestamp";
   const order = url.searchParams.get("order") === "asc" ? "asc" : "desc";
 
-  const where: Prisma.TransactionWhereInput = {};
+  const where: Prisma.TransactionWhereInput = { organisationId };
   if (riskLevel) where.riskLevel = riskLevel;
   if (status) where.status = status;
-  if (customerId) where.customerId = customerId;
+  /* Customer filter: the client sends an EXTERNAL customer id. */
+  if (customerId) where.customer = { externalId: customerId };
   if (dataSource) where.dataSource = dataSource;
   if (from || to) {
     where.timestamp = {};
@@ -76,9 +87,9 @@ export async function GET(request: Request) {
   }
   if (search) {
     where.OR = [
-      { id: { contains: search } },
+      { externalId: { contains: search } },
       { customerName: { contains: search } },
-      { customerId: { contains: search } },
+      { customer: { externalId: { contains: search } } },
       { merchant: { contains: search } },
       { location: { contains: search } },
       { device: { contains: search } },
@@ -89,7 +100,7 @@ export async function GET(request: Request) {
     db.transaction.count({ where }),
     db.transaction.findMany({
       where,
-      include: { investigation: true },
+      include: LEDGER_INCLUDE,
       orderBy: { [sort]: order },
       skip: (page - 1) * pageSize,
       take: pageSize,
@@ -122,6 +133,13 @@ const createSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const csrf = (await import("@/lib/server/auth/context")).assertSameOrigin(request);
+  if (csrf) return csrf;
+
+  const auth = await requirePermission(request, "transactions:write");
+  if (!auth.ok) return auth.response;
+  const { organisationId, user } = auth.value;
+
   const rl = rateLimit(clientKey(request, "txn-create"), 60, 60_000);
   if (!rl.allowed) {
     return jsonError(`Ledger writes are rate limited — retry in ${rl.retryAfterSec}s.`, 429);
@@ -139,35 +157,51 @@ export async function POST(request: Request) {
   }
   const input = parsed.data;
 
-  /* Duplicate guard — the ledger id is the natural key. */
+  /* Duplicate guard — external id is unique WITHIN the organisation. */
   const id = input.id?.trim() || newTxnId();
-  const existing = await db.transaction.findUnique({ where: { id } });
+  const existing = await db.transaction.findFirst({
+    where: { organisationId, externalId: id },
+    select: { id: true },
+  });
   if (existing) {
     return jsonError(
-      `Transaction ${id} already exists in the ledger — duplicate ingestion is blocked.`,
+      `Transaction ${id} already exists in this organisation's ledger — duplicate ingestion is blocked.`,
       409,
       { duplicateOf: id },
     );
   }
 
   try {
-    await scoreAndPersistTransaction({
-      id,
-      amount: input.amount,
-      customerId: input.customerId,
-      customerName: input.customerName,
-      merchant: input.merchant,
-      location: input.location,
-      device: input.device,
-      paymentMethod: input.paymentMethod,
-      timestamp: input.timestamp,
-      label: input.label ?? null,
-      dataSource: input.dataSource,
-    });
+    await scoreAndPersistTransaction(
+      {
+        id,
+        amount: input.amount,
+        customerId: input.customerId,
+        customerName: input.customerName,
+        merchant: input.merchant,
+        location: input.location,
+        device: input.device,
+        paymentMethod: input.paymentMethod,
+        timestamp: input.timestamp,
+        label: input.label ?? null,
+        dataSource: input.dataSource,
+      },
+      organisationId,
+    );
 
-    const row = await db.transaction.findUniqueOrThrow({
-      where: { id },
-      include: { investigation: true },
+    const row = await findOrgTransaction(organisationId, id);
+    if (!row) return jsonError("Could not read back the stored transaction.", 500);
+
+    await writeAudit({
+      organisationId,
+      actor: "ANALYST",
+      actorType: "HUMAN",
+      actorUserId: user.id,
+      actorName: user.name,
+      action: "TRANSACTION_MANUAL_ENTRY",
+      entityType: "Transaction",
+      entityId: id,
+      detail: { amount: input.amount, dataSource: input.dataSource },
     });
 
     return NextResponse.json({ ok: true, transaction: toUiTransaction(row) }, { status: 201 });
@@ -182,6 +216,10 @@ export async function POST(request: Request) {
 /* ------------------------------------------------------------------ */
 
 export async function PATCH(request: Request) {
+  const auth = await guardMutation(request, "investigations:decide");
+  if (!auth.ok) return auth.response;
+  const { organisationId, user } = auth.value;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -197,21 +235,25 @@ export async function PATCH(request: Request) {
   if (!parsed.success) return jsonError("id and status are required");
 
   const { id, status } = parsed.data;
-  const existing = await db.transaction.findUnique({ where: { id } });
+  const existing = await findOrgTransaction(organisationId, id);
   if (!existing) return jsonError("Transaction not found", 404);
 
   const updated = await db.transaction.update({
-    where: { id },
+    where: { id: existing.id },
     data: { status },
-    include: { investigation: true },
+    include: LEDGER_INCLUDE,
   });
   await writeAudit({
-    actor: "SYSTEM",
+    organisationId,
+    actor: "ANALYST",
+    actorType: "HUMAN",
+    actorUserId: user.id,
+    actorName: user.name,
     action: "STATUS_CHANGED",
     entityType: "Transaction",
     entityId: id,
     detail: { from: existing.status, to: status },
-    transactionId: id,
+    transactionId: existing.id,
   });
 
   return NextResponse.json({ ok: true, transaction: toUiTransaction(updated) });

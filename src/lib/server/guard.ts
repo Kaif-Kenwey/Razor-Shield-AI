@@ -1,72 +1,18 @@
 /**
- * RazorShield AI — route protection utilities (server-side only).
+ * RazorShield AI — server-side request utilities.
  *
- * This is a deliberately small, honest layer for a public no-auth demo:
+ * RATE LIMIT — a small in-memory fixed-window limiter blunts obvious
+ * abuse of expensive endpoints (LLM probes, investigations, imports,
+ * auth endpoints). State is per-process: good enough to stop casual
+ * hammering in a single-node deployment. Phase 2 (see
+ * docs/saas/implementation-roadmap.md) moves this behind Redis for a
+ * distributed, durable limiter — documented, not yet wired.
  *
- *   1. ADMIN GUARD — mutating "operator" surfaces (LLM config write/clear,
- *      destructive demo-data clears, ledger row deletes) can require a
- *      shared admin token. Enable it by setting ADMIN_TOKEN in the
- *      environment; the UI then prompts for the token once and sends it
- *      as the x-admin-token header. With no ADMIN_TOKEN set the app runs
- *      in open demo mode — writes stay allowed but every guarded action
- *      is audit-logged and /api/system/health reports the state so the
- *      mode is never silent.
- *
- *   2. RATE LIMIT — a tiny in-memory fixed-window limiter blunts obvious
- *      abuse of expensive endpoints (LLM probes, investigations, imports)
- *      on public deployments. State is per-process: good enough to stop
- *      casual hammering, not a substitute for an edge rate limiter.
+ * HISTORY NOTE: this module previously hosted a shared ADMIN_TOKEN guard
+ * for the public no-auth demo. Phase 1 replaced it with real
+ * authenticated sessions + RBAC (src/lib/server/auth/*) — the token
+ * guard was REMOVED, not disabled, so no route can fall back to it.
  */
-
-import { timingSafeEqual } from "crypto";
-
-/* ------------------------------------------------------------------ */
-/* Admin guard                                                         */
-/* ------------------------------------------------------------------ */
-
-export type AdminGuardState = {
-  /** "env" = ADMIN_TOKEN from environment; "open" = open demo mode. */
-  mode: "env" | "open";
-};
-
-export function adminGuardState(): AdminGuardState {
-  return { mode: process.env.ADMIN_TOKEN?.trim() ? "env" : "open" };
-}
-
-export function adminGuardEnabled(): boolean {
-  return adminGuardState().mode === "env";
-}
-
-/** Constant-time string equality (lengths may differ → false). */
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a, "utf8");
-  const bb = Buffer.from(b, "utf8");
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
-}
-
-/**
- * Returns null when the request may proceed, or a ready-to-return 401
- * response body describing what to do. Reads the token from the
- * `x-admin-token` header (what the UI sends) or `?adminToken=` (what a
- * script might use).
- */
-export function checkAdminGuard(request: Request): { ok: true } | { ok: false; message: string } {
-  const state = adminGuardState();
-  if (state.mode === "open") return { ok: true };
-
-  const header = request.headers.get("x-admin-token")?.trim() ?? "";
-  const query = new URL(request.url).searchParams.get("adminToken")?.trim() ?? "";
-  const provided = header || query;
-  const expected = process.env.ADMIN_TOKEN?.trim() ?? "";
-
-  if (provided && expected && safeEqual(provided, expected)) return { ok: true };
-  return {
-    ok: false,
-    message:
-      "This deployment requires an admin token for configuration changes. Set the x-admin-token header (the AI panel will prompt for it), or unset ADMIN_TOKEN to run in open demo mode.",
-  };
-}
 
 /* ------------------------------------------------------------------ */
 /* Fixed-window rate limiter (per process, per key)                    */
@@ -90,7 +36,7 @@ export interface RateLimitVerdict {
 /**
  * Fixed-window limiter. `key` should already contain route + identity
  * (e.g. `llm-config:save:1.2.3.4`). Fails OPEN on internal errors —
- * rate limiting must never take the demo down.
+ * rate limiting must never take the app down.
  */
 export function rateLimit(key: string, limit: number, windowMs: number): RateLimitVerdict {
   try {

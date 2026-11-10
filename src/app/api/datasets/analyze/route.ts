@@ -4,6 +4,10 @@
  * Scores an uploaded batch of payment records with the deterministic risk
  * engine (rse-1.2), computes honest quality metrics when ground-truth labels
  * are present, persists the run to SQLite, and returns the full analysis.
+ *
+ * Tenant-scoped: the stored run (Dataset + DatasetRow rows) belongs to the
+ * authenticated session's organisation. The scoring itself is pure and
+ * per-row — it never sees tenant state. Requires "datasets:import".
  */
 
 import { NextResponse } from "next/server";
@@ -17,6 +21,7 @@ import {
 import { labelValue, parseAmount, parseTimestamp } from "@/lib/csv";
 import type { ColumnMapping, DatasetAnalysis, RawRow, ScoredRow } from "@/types/dataset";
 import { DATASET_LIMITS } from "@/types/dataset";
+import { guardMutation } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -95,6 +100,10 @@ function bad(message: string, status = 400) {
 }
 
 export async function POST(request: Request) {
+  const auth = await guardMutation(request, "datasets:import");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -140,9 +149,11 @@ export async function POST(request: Request) {
   const flaggedCount = rowsOut.filter((r) => r.recommendation !== "ALLOW").length;
   const avgScore = rowsOut.reduce((s, r) => s + r.riskScore, 0) / rowsOut.length;
 
-  // persist (rows chunked to keep SQLite parameter counts sane)
+  // persist (rows chunked to keep SQLite parameter counts sane) —
+  // every stored row is tenant-scoped to the caller's organisation
   const created = await db.dataset.create({
     data: {
+      organisationId,
       name: name.trim().slice(0, 120),
       sourceFile: sourceFile.slice(0, 200),
       engineVersion: ENGINE_VERSION,
@@ -169,6 +180,7 @@ export async function POST(request: Request) {
   for (let i = 0; i < rowsOut.length; i += CHUNK) {
     await db.datasetRow.createMany({
       data: rowsOut.slice(i, i + CHUNK).map((r) => ({
+        organisationId,
         datasetId: created.id,
         rowIndex: r.index,
         txnId: r.txnId.slice(0, 64),

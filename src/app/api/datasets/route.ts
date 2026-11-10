@@ -1,16 +1,26 @@
 /**
  * GET /api/datasets — list recent analysis runs (summaries, no rows).
+ *
+ * Tenant-scoped: only datasets created by the authenticated session's
+ * organisation are listed. Requires "datasets:read".
  */
 
 import { NextResponse } from "next/server";
 
 import { db } from "@/lib/db";
 import type { DatasetSummary } from "@/types/dataset";
+import { requirePermission } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const auth = await requirePermission(request, "datasets:read");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const datasets = await db.dataset.findMany({
+    where: { organisationId },
     orderBy: { createdAt: "desc" },
     take: 30,
     select: {

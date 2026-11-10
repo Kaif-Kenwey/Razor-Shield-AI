@@ -1,12 +1,12 @@
 /**
- * POST /api/llm/models — live model catalogue for the AI panel.
+ * POST /api/llm/models — live model catalogue for the AI panel (tenant-scoped).
  *
  * Server-side proxy to the selected provider's model endpoint. The API
  * key (if the caller supplies one) is used for THIS request only, never
  * logged, never echoed back. When no key is supplied and the catalogue
  * needs one, the response says `needsAuth` instead of failing. When the
- * caller omits the key but the saved config belongs to the same
- * provider, the stored key is reused server-side.
+ * caller omits the key but the ORGANISATION's saved config belongs to
+ * the same provider, the stored key is reused server-side.
  *
  * FREE labels are computed from each provider's own pricing metadata at
  * fetch time (OpenRouter: prompt+completion price = 0). Models are ALSO
@@ -16,15 +16,17 @@
  * investigator. Nothing here is a hardcoded model list.
  *
  * Body: { provider, baseUrl?, apiKey?, extraHeaders? }
+ * Requires "org:config:manage".
  */
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { providerById, sanitizeApiKey, type ProviderId } from "@/lib/agent/providers";
-import { readRuntimeLlmConfig, reusableSavedKey } from "@/lib/agent/llmConfigStore";
+import { readOrgLlmConfig, reusableOrgSavedKey } from "@/lib/agent/llmConfigStore";
 import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
 import { describeProviderHttpFailure, extractProviderMessage } from "@/lib/server/providerErrors";
 import { clientKey, rateLimit } from "@/lib/server/guard";
+import { guardMutation } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -180,6 +182,10 @@ async function openAiCompatCatalogue(
 }
 
 export async function POST(request: Request) {
+  const auth = await guardMutation(request, "org:config:manage");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const rl = rateLimit(clientKey(request, "llm-models"), 30, 60_000);
   if (!rl.allowed) {
     return NextResponse.json(
@@ -202,16 +208,17 @@ export async function POST(request: Request) {
   const { provider, extraHeaders } = parsed.data;
   const meta = providerById(provider);
 
-  /* Key resolution: caller-supplied → saved key for the same provider /
-   * same endpoint → none. The stored key never leaves the server. The
-   * supplied key is normalized (quotes / "Bearer " / whitespace stripped)
-   * so a careless paste still authenticates. */
-  const saved = readRuntimeLlmConfig();
+  /* Key resolution: caller-supplied → the ORGANISATION's saved key for
+   * the same provider / same endpoint → none. The stored key never
+   * leaves the server. The supplied key is normalized (quotes /
+   * "Bearer " / whitespace stripped) so a careless paste still
+   * authenticates. */
+  const saved = await readOrgLlmConfig(organisationId);
   const suppliedKey = parsed.data.apiKey ? sanitizeApiKey(parsed.data.apiKey) : "";
   let key = suppliedKey || undefined;
   if (!key) {
     if (saved?.provider === provider) key = saved.apiKey;
-    else if (parsed.data.baseUrl) key = reusableSavedKey(provider, parsed.data.baseUrl);
+    else if (parsed.data.baseUrl) key = await reusableOrgSavedKey(organisationId, provider, parsed.data.baseUrl);
   }
 
   try {

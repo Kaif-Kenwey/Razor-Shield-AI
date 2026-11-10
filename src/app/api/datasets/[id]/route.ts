@@ -1,6 +1,11 @@
 /**
  * GET    /api/datasets/:id — full stored analysis (rows ordered flag-first).
  * DELETE /api/datasets/:id — remove a stored analysis (rows cascade).
+ *
+ * Tenant-scoped: the dataset is resolved within the authenticated
+ * session's organisation. A dataset belonging to another tenant is
+ * indistinguishable from a missing one (404) — non-disclosing by design.
+ * GET requires "datasets:read"; DELETE requires "datasets:delete".
  */
 
 import { NextResponse } from "next/server";
@@ -9,16 +14,22 @@ import { db } from "@/lib/db";
 import { ENGINE_VERSION } from "@/lib/riskEngine";
 import type { DatasetAnalysis, ScoredRow } from "@/types/dataset";
 import type { RiskLevel } from "@/types";
+import { guardMutation, requirePermission } from "@/lib/server/auth/context";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type RouteCtx = { params: Promise<{ id: string }> };
 
-export async function GET(_request: Request, ctx: RouteCtx) {
+export async function GET(request: Request, ctx: RouteCtx) {
+  const auth = await requirePermission(request, "datasets:read");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const { id } = await ctx.params;
 
-  const dataset = await db.dataset.findUnique({
-    where: { id },
+  const dataset = await db.dataset.findFirst({
+    where: { organisationId, id },
     include: {
       rows: { orderBy: [{ riskScore: "desc" }, { rowIndex: "asc" }] },
     },
@@ -115,14 +126,22 @@ export async function GET(_request: Request, ctx: RouteCtx) {
   return NextResponse.json({ analysis });
 }
 
-export async function DELETE(_request: Request, ctx: RouteCtx) {
+export async function DELETE(request: Request, ctx: RouteCtx) {
+  const auth = await guardMutation(request, "datasets:delete");
+  if (!auth.ok) return auth.response;
+  const { organisationId } = auth.value;
+
   const { id } = await ctx.params;
 
-  const existing = await db.dataset.findUnique({ where: { id }, select: { id: true } });
+  /* Org-scoped resolution: foreign-tenant and missing ids both 404. */
+  const existing = await db.dataset.findFirst({
+    where: { organisationId, id },
+    select: { id: true },
+  });
   if (!existing) {
     return NextResponse.json({ error: "Dataset not found" }, { status: 404 });
   }
 
-  await db.dataset.delete({ where: { id } });
+  await db.dataset.delete({ where: { id: existing.id } });
   return NextResponse.json({ ok: true });
 }

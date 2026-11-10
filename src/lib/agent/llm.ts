@@ -21,7 +21,7 @@
  * imported only from API routes — never ship the key to the browser.
  */
 
-import { readRuntimeLlmConfig } from "./llmConfigStore";
+import { readOrgLlmConfig, readRuntimeLlmConfig } from "./llmConfigStore";
 import { providerById, sanitizeApiKey } from "./providers";
 import { assertSafeLlmUrl, UrlGuardError } from "@/lib/server/ssrf";
 import { describeProviderHttpFailure, extractProviderMessage } from "@/lib/server/providerErrors";
@@ -44,12 +44,27 @@ export interface ChatMessage {
   content: string;
 }
 
-export function resolveLlmConfig(): LlmConfig | null {
-  /* 1. Runtime config saved from the in-app AI panel wins. */
+/**
+ * Resolves the active LLM configuration. Priority order:
+ *   1. The organisation's own saved config (Phase 1 multi-tenancy — every
+ *      tenant gets its own provider, model and sealed key; one org can
+ *      never see or use another's credentials).
+ *   2. Environment variables (infra-managed deployments).
+ *   3. null → the deterministic heuristic investigator answers.
+ */
+export async function resolveLlmConfig(organisationId?: string | null): Promise<LlmConfig | null> {
+  /* 1. The organisation's own config wins. */
+  if (organisationId) {
+    const org = await readOrgLlmConfig(organisationId);
+    if (org) return org;
+  }
+
+  /* 2. Legacy single-tenant runtime config (pre-SaaS upgrades before
+   * migration runs) — kept for backward compatibility only. */
   const runtime = readRuntimeLlmConfig();
   if (runtime) return runtime;
 
-  /* 2. Environment fallback (infra-managed deployments). */
+  /* 3. Environment fallback (infra-managed deployments). */
   const baseUrl = process.env.LLM_BASE_URL?.trim();
   const apiKey = process.env.LLM_API_KEY?.trim();
   if (!baseUrl || !apiKey) return null;
@@ -82,8 +97,8 @@ export function resolveLlmConfig(): LlmConfig | null {
   };
 }
 
-export function llmConfigured(): boolean {
-  return resolveLlmConfig() !== null;
+export async function llmConfigured(organisationId?: string | null): Promise<boolean> {
+  return (await resolveLlmConfig(organisationId)) !== null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -187,12 +202,13 @@ export class LlmError extends Error {
   }
 }
 
-/** One-shot chat completion. Throws LlmError on any failure. */
+/** One-shot chat completion. Throws LlmError on any failure.
+ * `organisationId` selects the tenant's own provider config. */
 export async function chatComplete(
   messages: ChatMessage[],
-  opts?: { temperature?: number; maxTokens?: number; timeoutMs?: number },
+  opts?: { temperature?: number; maxTokens?: number; timeoutMs?: number; organisationId?: string | null },
 ): Promise<{ content: string; model: string }> {
-  const cfg = resolveLlmConfig();
+  const cfg = await resolveLlmConfig(opts?.organisationId);
   if (!cfg) throw new LlmError("LLM is not configured (set it in the AI panel or via LLM_BASE_URL / LLM_API_KEY)");
 
   /* SSRF guard — the endpoint may come from operator config; validate it

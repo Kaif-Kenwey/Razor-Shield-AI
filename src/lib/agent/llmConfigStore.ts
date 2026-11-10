@@ -234,3 +234,121 @@ export function runtimeConfigVerified(): { verifiedAt: string; verifiedModel: st
   if (!saved?.verifiedAt) return null;
   return { verifiedAt: saved.verifiedAt, verifiedModel: saved.verifiedModel ?? "" };
 }
+
+/* ------------------------------------------------------------------ */
+/* Per-organisation config (DB-backed — Phase 1 multi-tenancy)         */
+/*                                                                     */
+/* Each organisation stores its own provider config with the API key   */
+/* AES-256-GCM sealed via the shared secret box (src/lib/server/       */
+/* secretBox.ts). The legacy single-tenant file store above is kept    */
+/* only for the migration path (scripts/migrate-to-multitenant.ts)     */
+/* and legacy tests — the app reads/writes the org config.             */
+/* ------------------------------------------------------------------ */
+
+import { db } from "@/lib/db";
+import { isSealed, openSecret, sealSecret } from "@/lib/server/secretBox";
+
+function orgRowToConfig(row: {
+  provider: string;
+  baseUrl: string;
+  apiKeyEnc: string;
+  model: string;
+  extraHeadersJson: string;
+  routing: string | null;
+  verifiedAt: Date | null;
+  verifiedModel: string | null;
+}): RuntimeLlmConfig | null {
+  const apiKey = openSecret(row.apiKeyEnc);
+  if (!row.baseUrl || !apiKey) return null;
+  let extraHeaders: Record<string, string> = {};
+  try {
+    const parsed = JSON.parse(row.extraHeadersJson) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      extraHeaders = Object.fromEntries(
+        Object.entries(parsed).filter(([, v]) => typeof v === "string" && v.length > 0) as [string, string][],
+      );
+    }
+  } catch {
+    /* empty headers on malformed JSON */
+  }
+  return {
+    baseUrl: row.baseUrl.replace(/\/+$/, ""),
+    apiKey,
+    model: row.model,
+    extraHeaders,
+    provider: row.provider || "custom",
+    routing: row.routing ?? undefined,
+    verifiedAt: row.verifiedAt?.toISOString() ?? undefined,
+    verifiedModel: row.verifiedModel ?? undefined,
+  };
+}
+
+/** Reads one organisation's LLM config (null when absent or unopenable). */
+export async function readOrgLlmConfig(organisationId: string): Promise<RuntimeLlmConfig | null> {
+  if (!organisationId) return null;
+  try {
+    const row = await db.llmProviderConfig.findUnique({ where: { organisationId } });
+    if (!row) return null;
+    return orgRowToConfig(row);
+  } catch {
+    return null;
+  }
+}
+
+/** Persists (or clears) one organisation's LLM config. */
+export async function writeOrgLlmConfig(organisationId: string, cfg: RuntimeLlmConfig | null): Promise<void> {
+  if (!cfg) {
+    await db.llmProviderConfig.deleteMany({ where: { organisationId } });
+    return;
+  }
+  const data = {
+    provider: cfg.provider ?? "custom",
+    baseUrl: cfg.baseUrl.replace(/\/+$/, ""),
+    // Re-seal only raw keys; already-sealed values (reused saved key) pass through.
+    apiKeyEnc: isSealed(cfg.apiKey) ? cfg.apiKey : sealSecret(cfg.apiKey),
+    model: cfg.model,
+    extraHeadersJson: JSON.stringify(cfg.extraHeaders ?? {}),
+    routing: cfg.routing ?? null,
+    verifiedAt: cfg.verifiedAt ? new Date(cfg.verifiedAt) : null,
+    verifiedModel: cfg.verifiedModel ?? null,
+  };
+  await db.llmProviderConfig.upsert({
+    where: { organisationId },
+    update: data,
+    create: { organisationId, ...data },
+  });
+}
+
+/** Returns the org's saved key when re-saving the SAME provider+endpoint. */
+export async function reusableOrgSavedKey(
+  organisationId: string,
+  provider: string | undefined,
+  baseUrl: string,
+): Promise<string | undefined> {
+  const saved = await readOrgLlmConfig(organisationId);
+  if (!saved) return undefined;
+  const sameProvider = provider !== undefined && saved.provider === provider;
+  const sameEndpoint = saved.baseUrl.replace(/\/+$/, "") === baseUrl.replace(/\/+$/, "");
+  if ((sameProvider && sameEndpoint) || sameEndpoint) return saved.apiKey;
+  return undefined;
+}
+
+/** Records a successful live verification against the org's saved config. */
+export async function markOrgConfigVerified(organisationId: string, model: string): Promise<void> {
+  const saved = await readOrgLlmConfig(organisationId);
+  if (!saved) return;
+  await writeOrgLlmConfig(organisationId, {
+    ...saved,
+    verifiedAt: new Date().toISOString(),
+    verifiedModel: model,
+  });
+}
+
+/** True when the org's saved config has been live-verified. */
+export async function orgConfigVerified(
+  organisationId: string,
+): Promise<{ verifiedAt: string; verifiedModel: string } | null> {
+  const saved = await readOrgLlmConfig(organisationId);
+  if (!saved?.verifiedAt) return null;
+  return { verifiedAt: saved.verifiedAt, verifiedModel: saved.verifiedModel ?? "" };
+}

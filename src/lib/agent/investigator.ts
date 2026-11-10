@@ -177,8 +177,11 @@ function buildCaseBlock(ctx: AgentCaseContext): string {
  * verdict fails validation — the caller then falls back to the heuristic
  * engine, and the UI labels which mode produced the final analysis.
  */
-export async function investigateCase(ctx: AgentCaseContext): Promise<AgentVerdict | null> {
-  if (!llmConfigured()) return null;
+export async function investigateCase(
+  ctx: AgentCaseContext,
+  organisationId?: string | null,
+): Promise<AgentVerdict | null> {
+  if (!(await llmConfigured(organisationId))) return null;
 
   try {
     const { content, model } = await chatComplete(
@@ -186,7 +189,7 @@ export async function investigateCase(ctx: AgentCaseContext): Promise<AgentVerdi
         { role: "system", content: buildSystemPrompt() },
         { role: "user", content: buildCaseBlock(ctx) },
       ],
-      { temperature: 0.2, maxTokens: 800, timeoutMs: 22_000 },
+      { temperature: 0.2, maxTokens: 800, timeoutMs: 22_000, organisationId },
     );
 
     const raw = extractJson(content);

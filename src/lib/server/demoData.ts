@@ -173,11 +173,12 @@ function suspiciousScenarios(rnd: () => number): GenTxn[] {
 }
 
 /** Seed the ledger with a reproducible demo portfolio. Idempotent-ish:
- * skips customers/txns that already exist. */
-export async function seedDemoData(): Promise<{ created: number; skipped: number }> {
+ * skips customers/txns that already exist.
+ * TENANT SCOPE: seeds into the caller's organisation only. */
+export async function seedDemoData(organisationId: string): Promise<{ created: number; skipped: number }> {
   const rnd = mulberry(20260112);
 
-  const existing = await db.transaction.count({ where: { dataSource: "demo" } });
+  const existing = await db.transaction.count({ where: { organisationId, dataSource: "demo" } });
   if (existing > 0) {
     return { created: 0, skipped: existing };
   }
@@ -185,17 +186,22 @@ export async function seedDemoData(): Promise<{ created: number; skipped: number
   // KYC-tier variety so customer profiles aren't uniform
   // (SQLite has no createMany skipDuplicates — upsert keeps it idempotent)
   for (const [i, c] of CUSTOMER_POOL.entries()) {
-    await db.customer.upsert({
-      where: { id: c.id },
-      update: {},
-      create: {
-        id: c.id,
-        name: c.name,
-        kycTier: i % 3 === 0 ? "FULL KYC" : i % 3 === 1 ? "MIN KYC" : "PENDING",
-        riskProfile: "normal",
-        priorIncidents: 0,
-      },
+    const existingCustomer = await db.customer.findFirst({
+      where: { organisationId, externalId: c.id },
+      select: { id: true },
     });
+    if (!existingCustomer) {
+      await db.customer.create({
+        data: {
+          organisationId,
+          externalId: c.id,
+          name: c.name,
+          kycTier: i % 3 === 0 ? "FULL KYC" : i % 3 === 1 ? "MIN KYC" : "PENDING",
+          riskProfile: "normal",
+          priorIncidents: 0,
+        },
+      });
+    }
   }
 
   const all = [...normalTraffic(6, 64, rnd), ...suspiciousScenarios(rnd)];
@@ -203,11 +209,12 @@ export async function seedDemoData(): Promise<{ created: number; skipped: number
   // chronological order so customer history reads naturally
   all.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   for (const t of all) {
-    await scoreAndPersistTransaction({ ...t, id: nextId(), dataSource: "demo" });
+    await scoreAndPersistTransaction({ ...t, id: nextId(), dataSource: "demo" }, organisationId);
     created += 1;
   }
 
   await writeAudit({
+    organisationId,
     actor: "SYSTEM",
     action: "DEMO_SEEDED",
     entityType: "Ledger",
@@ -223,7 +230,7 @@ export async function seedDemoData(): Promise<{ created: number; skipped: number
  * traffic, otherwise one of the alert shapes. Returns the created ids so
  * the client can highlight them.
  */
-export async function generateDemoArrival(): Promise<{ ids: string[]; burst: boolean }> {
+export async function generateDemoArrival(organisationId: string): Promise<{ ids: string[]; burst: boolean }> {
   const rnd = mulberry((Date.now() ^ 0x5f3759df) >>> 0);
   const roll = rnd();
   const batch: GenTxn[] = [];
@@ -274,16 +281,17 @@ export async function generateDemoArrival(): Promise<{ ids: string[]; burst: boo
   const ids: string[] = [];
   for (const t of batch) {
     const id = nextId();
-    await scoreAndPersistTransaction({ ...t, id, dataSource: "demo" });
+    await scoreAndPersistTransaction({ ...t, id, dataSource: "demo" }, organisationId);
     ids.push(id);
   }
   return { ids, burst: batch.length > 1 };
 }
 
-/** Clear ONLY synthetic demo records — imported/manual data survives. */
-export async function clearDemoData(): Promise<{ deleted: number }> {
+/** Clear ONLY synthetic demo records in the caller's organisation —
+ * imported/manual data and other tenants survive. */
+export async function clearDemoData(organisationId: string): Promise<{ deleted: number }> {
   const demoTxns = await db.transaction.findMany({
-    where: { dataSource: "demo" },
+    where: { organisationId, dataSource: "demo" },
     select: { id: true },
   });
   const ids = demoTxns.map((t) => t.id);
@@ -295,7 +303,7 @@ export async function clearDemoData(): Promise<{ deleted: number }> {
 
   // customers that no longer have any transactions in the ledger
   const orphans = await db.customer.findMany({
-    where: { transactions: { none: {} } },
+    where: { organisationId, transactions: { none: {} } },
     select: { id: true },
   });
   if (orphans.length) {
@@ -303,6 +311,7 @@ export async function clearDemoData(): Promise<{ deleted: number }> {
   }
 
   await writeAudit({
+    organisationId,
     actor: "SYSTEM",
     action: "DEMO_CLEARED",
     entityType: "Ledger",

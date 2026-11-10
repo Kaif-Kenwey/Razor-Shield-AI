@@ -1,8 +1,24 @@
-// RazorShield AI — Prisma schema (SQLite)
+// RazorShield AI — Prisma schema (Phase 1: SaaS multi-tenant foundation)
 //
-// The Dataset Studio persists every analysis run so analysts can revisit
-// prior batch scores, compare metrics across files, and audit what the
-// engine did on a given day.
+// TENANCY MODEL
+//   Every business record carries `organisationId`. The organisation is
+//   always derived server-side from the authenticated session's verified
+//   membership — never from a client-supplied id. Composite unique
+//   constraints (`@@unique([organisationId, externalId])`) guarantee that
+//   the same source-system id (a CSV transaction id, a customer code) can
+//   exist in two organisations without colliding or leaking.
+//
+// SURROGATE KEYS
+//   Transaction and Customer previously used externally-supplied ids as
+//   primary keys. In a multi-tenant database that is unsafe (two orgs can
+//   import the same payment file), so both now use cuid primary keys and
+//   keep the source id in `externalId`. All API URLs continue to use the
+//   external id, resolved per-organisation.
+//
+// POSTGRESQL PATH
+//   This schema is provider-neutral (no SQLite-only types). Production
+//   deployments switch `datasource db.provider` to "postgresql" — see
+//   scripts/migrate-sqlite-to-postgres.ts and docs/saas/postgres-migration.md.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,9 +29,175 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/* ------------------------------------------------------------------ */
+/* Identity & access                                                   */
+/* ------------------------------------------------------------------ */
+
+/// A human user of the platform. Passwords are stored as bcrypt hashes
+/// (cost 12). `isPlatformAdmin` is a platform-level flag, independent of
+/// any organisation role.
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String
+  /// bcrypt hash — never the password itself.
+  passwordHash    String
+  isPlatformAdmin Boolean   @default(false)
+  emailVerifiedAt DateTime?
+  /// AES-256-GCM encrypted TOTP secret (RFC 6238, via otplib).
+  totpSecretEnc   String?
+  totpEnabled     Boolean   @default(false)
+  /// Consecutive failed logins (reset on success) for account lockout.
+  failedLogins    Int       @default(0)
+  lockedUntil     DateTime?
+  lastLoginAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  sessions    Session[]
+  tokens      VerificationToken[]
+  memberships Membership[]
+  auditEvents AuditEvent[]        @relation("AuditActor")
+  invited     Invitation[]        @relation("InvitationInvitedBy")
+
+  @@index([email])
+}
+
+/// A server-side session. The cookie carries only a random opaque token;
+/// this table stores its SHA-256 hash. Revocation is immediate.
+model Session {
+  id         String    @id @default(cuid())
+  userId     String
+  /// SHA-256 of the opaque session token — the raw token never stored.
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// Single-use, expiring tokens: email verification, password reset,
+/// MFA login challenges. Raw tokens are never stored — only their hash.
+model VerificationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  /// EMAIL_VERIFY | PASSWORD_RESET | MFA_CHALLENGE
+  purpose   String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+}
+
+/* ------------------------------------------------------------------ */
+/* Tenants                                                             */
+/* ------------------------------------------------------------------ */
+
+/// An organisation (tenant) on the platform.
+model Organisation {
+  id        String   @id @default(cuid())
+  name      String
+  /// URL-safe unique handle, used for display and future subdomains.
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships   Membership[]
+  invitations   Invitation[]
+  customers     Customer[]
+  transactions  Transaction[]
+  datasets      Dataset[]
+  investigations Investigation[]
+  auditEvents   AuditEvent[]
+  llmConfig     LlmProviderConfig?
+
+  @@index([slug])
+}
+
+/// A user's role inside one organisation.
+model Membership {
+  id             String   @id @default(cuid())
+  organisationId String
+  userId         String
+  /// OWNER | ADMIN | FRAUD_MANAGER | ANALYST | INVESTIGATOR | AUDITOR | VIEWER | BILLING_ADMIN
+  role           String   @default("VIEWER")
+  createdAt      DateTime @default(now())
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organisationId, userId])
+  @@index([userId])
+}
+
+/// A pending invitation to join an organisation. The raw token is emailed
+/// (dev: logged/surfaced in-app); only its hash is stored.
+model Invitation {
+  id             String    @id @default(cuid())
+  organisationId String
+  email          String
+  /// Role the invitee will receive on acceptance.
+  role           String
+  tokenHash      String    @unique
+  invitedById    String?
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  invitedBy    User?        @relation("InvitationInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  @@index([organisationId])
+  @@index([email])
+}
+
+/* ------------------------------------------------------------------ */
+/* Tenant configuration                                                */
+/* ------------------------------------------------------------------ */
+
+/// Per-organisation LLM investigator configuration. The API key is
+/// AES-256-GCM encrypted at rest (`apiKeyEnc`) — the plaintext never
+/// leaves the server. Replaces the legacy single-tenant
+/// db/llm-config.json file (migrated on upgrade).
+model LlmProviderConfig {
+  id               String    @id @default(cuid())
+  organisationId   String    @unique
+  /// openrouter | gemini | groq | ollama | custom | env
+  provider         String
+  baseUrl          String
+  /// AES-256-GCM: "enc:v1:iv.tag.ciphertext" (hex).
+  apiKeyEnc        String
+  model            String
+  extraHeadersJson String    @default("{}")
+  routing          String?
+  verifiedAt       DateTime?
+  verifiedModel    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+}
+
+/* ------------------------------------------------------------------ */
+/* Business records — every row tenant-scoped                          */
+/* ------------------------------------------------------------------ */
+
 /// One uploaded batch of payment records + its aggregate metrics.
 model Dataset {
   id             String   @id @default(cuid())
+  organisationId String
   name           String
   sourceFile     String
   engineVersion  String
@@ -40,52 +222,55 @@ model Dataset {
   /// Rupee value of fraud the engine missed.
   fnCost         Float    @default(0)
   createdAt      DateTime @default(now())
-  rows           DatasetRow[]
 
-  @@index([createdAt])
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  rows         DatasetRow[]
+
+  @@index([organisationId, createdAt])
 }
 
 /// One scored payment record inside a dataset.
 model DatasetRow {
-  id            String  @id @default(cuid())
-  dataset       Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
-  datasetId     String
-  rowIndex      Int
-  txnId         String
-  amount        Float
-  timestamp     String?
-  customerId    String
-  customerName  String  @default("")
-  merchant      String  @default("")
-  location      String  @default("")
-  device        String  @default("")
-  paymentMethod String  @default("")
+  id             String  @id @default(cuid())
+  organisationId String
+  dataset        Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  datasetId      String
+  rowIndex       Int
+  txnId          String
+  amount         Float
+  timestamp      String?
+  customerId     String
+  customerName   String  @default("")
+  merchant       String  @default("")
+  location       String  @default("")
+  device         String  @default("")
+  paymentMethod  String  @default("")
   /// 1 = fraud, 0 = legit, null = unlabeled.
-  label         Int?
-  riskScore     Float
-  riskLevel     String
+  label          Int?
+  riskScore      Float
+  riskLevel      String
   recommendation String
   /// Fired signals, JSON-encoded [{ type, title, evidence, severity, impact, facts }].
-  signalsJson   String  @default("[]")
+  signalsJson    String  @default("[]")
   /// tp / fp / fn / tn when labeled.
-  outcome       String?
-  warnings      String  @default("[]")
+  outcome        String?
+  warnings       String  @default("[]")
 
   @@index([datasetId])
   @@index([datasetId, riskLevel])
+  @@index([organisationId])
 }
-
-// ---------------------------------------------------------------------------
-// Ledger models — the transactional source of truth for the whole app.
-// The dashboard, ledger, investigations and metrics all read from these;
-// Dataset Studio remains a batch-analysis workspace on top of the engine.
-// ---------------------------------------------------------------------------
 
 /// A payment customer. Identity + slow-changing profile only — rolling
 /// statistics (avg/median ticket, usual device/location, incident count)
 /// are derived from stored transactions so they can never drift.
+///
+/// `externalId` is the source-system customer code (e.g. CUS_F402A4D3).
+/// Uniqueness is per-organisation: two tenants may both hold "CUS_1".
 model Customer {
-  id             String        @id
+  id             String        @id @default(cuid())
+  organisationId String
+  externalId     String
   name           String        @default("")
   /// FULL KYC | MIN KYC | PENDING
   kycTier        String        @default("MIN KYC")
@@ -94,15 +279,23 @@ model Customer {
   priorIncidents Int           @default(0)
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
-  transactions   Transaction[]
 
-  @@index([riskProfile])
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@unique([organisationId, externalId])
+  @@index([organisationId, riskProfile])
 }
 
 /// A scored payment stored in the ledger. Every stage of the lifecycle
 /// (scoring, investigation, analyst decision) works on these rows.
+///
+/// `externalId` is the payment id shown in the UI (engine TXN_… or a
+/// source file's transaction_id). Uniqueness is per-organisation.
 model Transaction {
-  id             String         @id
+  id             String         @id @default(cuid())
+  organisationId String
+  externalId     String
   amount         Float
   currency       String         @default("INR")
   customerId     String
@@ -132,26 +325,33 @@ model Transaction {
   dataSource     String         @default("demo")
   /// Ground-truth fraud label when known (1/0), else null.
   label          Int?
-  /// Current assignee (analyst roster id) — server-persisted handoff.
+  /// Assignee User.id — server-persisted handoff (null = unassigned pool).
   assigneeId     String?
-  /// Analyst roster id this SLA-breach case was escalated to.
+  /// Assignee display name snapshot (roster rows migrated pre-auth keep legacy ids).
+  assigneeName   String?
+  /// User.id this SLA-breach case was escalated to.
   escalatedTo    String?
+  escalatedName  String?
   investigation  Investigation?
   auditEvents    AuditEvent[]
   caseNotes      CaseNote[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
-  @@index([timestamp])
-  @@index([customerId])
-  @@index([status])
-  @@index([riskLevel])
-  @@index([dataSource])
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  @@unique([organisationId, externalId])
+  @@index([organisationId, timestamp])
+  @@index([organisationId, status])
+  @@index([organisationId, riskLevel])
+  @@index([organisationId, customerId])
+  @@index([organisationId, dataSource])
 }
 
 /// Persisted AI/heuristic investigation of one transaction (latest wins).
 model Investigation {
   id                        String      @id @default(cuid())
+  organisationId            String
   transaction               Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
   transactionId             String      @unique
   /// llm | heuristic
@@ -176,40 +376,63 @@ model Investigation {
   resolvedAt                DateTime?
   createdAt                 DateTime    @default(now())
 
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
   @@index([transactionId])
+  @@index([organisationId])
 }
 
 /// Append-only analyst notebook entry for one case. Server-persisted so
 /// the notebook survives browsers, devices and demo-data clears — it is
-/// part of the case record, not client state.
+/// part of the case record, not client state. New entries attribute the
+/// authenticated user (`analystId` = User.id, `analystName` snapshot);
+/// rows migrated from the single-tenant era keep their legacy roster ids.
 model CaseNote {
   id            String      @id @default(cuid())
+  organisationId String
   transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
   transactionId String
   /// Notebook text (trimmed, bounded by the API schema).
   text          String
-  /// Roster id of the analyst who logged the entry (e.g. "RK").
+  /// Authoring user id (legacy migrated rows may hold a roster id).
   analystId     String
+  /// Display name snapshot for the audit view.
+  analystName   String?
   createdAt     DateTime    @default(now())
 
   @@index([transactionId, createdAt])
+  @@index([organisationId])
 }
 
-/// Append-only audit log for system, engine and analyst actions.
+/// Append-only audit log for system, engine, analyst and auth actions.
 /// transactionId uses SetNull so the trail survives transaction deletion.
+/// Auth events (login, logout, failed logins) may be organisation-less.
 model AuditEvent {
   id            String       @id @default(cuid())
-  /// SYSTEM | AI ENGINE | RISK MODEL | ANALYST
+  organisationId String?
+  /// SYSTEM | AI ENGINE | RISK MODEL | ANALYST — display label.
   actor         String
-  /// TRANSACTION_CREATED | TRANSACTION_SCORED | INVESTIGATION_COMPLETED | DECISION_RECORDED | STATUS_CHANGED | DATASET_IMPORTED | DEMO_SEEDED | DEMO_CLEARED | TRANSACTION_DELETED
+  /// HUMAN | SYSTEM | AI | INTEGRATION — machine-readable actor type.
+  actorType     String       @default("SYSTEM")
+  /// Authenticated User.id when a human performed the action.
+  actorUserId   String?
+  actorName     String?
+  /// TRANSACTION_CREATED | TRANSACTION_SCORED | INVESTIGATION_COMPLETED | DECISION_RECORDED | STATUS_CHANGED | DATASET_IMPORTED | USER_LOGIN | LOGIN_FAILED | LOGOUT | USER_REGISTERED | ORG_CREATED | MEMBER_INVITED | MEMBER_ROLE_CHANGED | MEMBER_REMOVED | LLM_CONFIG_UPDATED | API_KEY_* | ...
   action        String
   entityType    String
   entityId      String
   detailJson    String       @default("{}")
+  /// Correlation id for request tracing (Phase 2: full OTel wiring).
+  correlationId String?
   transaction   Transaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
   transactionId String?
   createdAt     DateTime     @default(now())
 
+  organisation Organisation? @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  actorUser    User?         @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
   @@index([createdAt])
   @@index([entityType, entityId])
+  @@index([organisationId, createdAt])
+  @@index([action])
 }

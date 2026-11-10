@@ -47,10 +47,11 @@ interface PriorRow {
 /** Load prior transactions (STRICTLY BEFORE the case timestamp) with their
  * adjudication. `lt` (not `lte`) guarantees the case under investigation
  * can never appear in its own prior history — a self-included count or
- * average would mislead the analyst and the LLM alike. */
-async function loadPriorRows(customerId: string, at: Date): Promise<PriorRow[]> {
+ * average would mislead the analyst and the LLM alike. Queries are also
+ * tenant-scoped: no other organisation's ledger can feed this context. */
+async function loadPriorRows(organisationId: string, customerId: string, at: Date): Promise<PriorRow[]> {
   const rows = await db.transaction.findMany({
-    where: { timestamp: { lt: at } },
+    where: { organisationId, timestamp: { lt: at } },
     orderBy: { timestamp: "desc" },
     take: RECALL_POOL,
     select: {
@@ -176,6 +177,8 @@ export interface ServerCaseContext {
   /** Server facts echoed back so any caller can audit what was used. */
   factsSummary: {
     transactionId: string;
+    /** Surrogate row id — used for persistence joins, never exposed to clients. */
+    transactionRowId: string;
     amount: number;
     riskScore: number;
     riskLevel: string;
@@ -187,12 +190,18 @@ export interface ServerCaseContext {
 }
 
 /**
- * Builds the investigation context for a case entirely from SQLite.
- * Returns null when the transaction does not exist.
+ * Builds the investigation context for a case entirely from SQLite,
+ * tenant-scoped to `organisationId`. `txnId` is the EXTERNAL payment id
+ * (unique within the organisation); returns null when no row exists —
+ * the same answer for "not found" and "not yours", so cross-tenant
+ * probing learns nothing.
  */
-export async function loadServerCaseContext(txnId: string): Promise<ServerCaseContext | null> {
-  const row = await db.transaction.findUnique({
-    where: { id: txnId },
+export async function loadServerCaseContext(
+  txnId: string,
+  organisationId: string,
+): Promise<ServerCaseContext | null> {
+  const row = await db.transaction.findFirst({
+    where: { organisationId, externalId: txnId },
     include: { investigation: true },
   });
   if (!row) return null;
@@ -208,9 +217,11 @@ export async function loadServerCaseContext(txnId: string): Promise<ServerCaseCo
 
   const at = row.timestamp;
   const [priorRows, customer, priorIncidentCount] = await Promise.all([
-    loadPriorRows(row.customerId, at),
+    loadPriorRows(organisationId, row.customerId, at),
     db.customer.findUnique({ where: { id: row.customerId } }),
-    db.transaction.count({ where: { customerId: row.customerId, timestamp: { lt: at }, label: 1 } }),
+    db.transaction.count({
+      where: { organisationId, customerId: row.customerId, timestamp: { lt: at }, label: 1 },
+    }),
   ]);
 
   const priorForCustomer = priorRows.filter((r) => r.customerId === row.customerId);
@@ -277,7 +288,8 @@ export async function loadServerCaseContext(txnId: string): Promise<ServerCaseCo
   return {
     context,
     factsSummary: {
-      transactionId: row.id,
+      transactionId: row.externalId,
+      transactionRowId: row.id,
       amount: row.amount,
       riskScore: Math.round(row.riskScore),
       riskLevel: row.riskLevel,
